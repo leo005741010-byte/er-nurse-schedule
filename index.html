@@ -97,8 +97,10 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
 .shift-cnt{font-size:9px;color:#888;}
 .shift-cnt.short{color:#c0392b;font-weight:700;}
 .shift-cnt.over{color:#8d6e00;font-weight:800;background:#fff8e1;border:1px solid #ffd54f;border-radius:3px;padding:0 3px;}
-/* 日期上的提示符號：空缺與超過上限一律用同一個黃色⚠(⚠本身就是黃底emoji，
-   ❗emoji在Windows固定被畫成紅色、CSS改不了顏色，故不採用) */
+/* 日期上的提示符號：空缺與超過上限一律用同一個黃色⚠️三角形。
+   必須寫成「⚠️」(U+26A0 + U+FE0F變體選擇碼)才會強制以彩色emoji樣式呈現(黃底黑框)；
+   少了FE0F在Windows會退回純文字樣式的黑白細線圖示，不明顯。
+   ❗emoji在Windows固定被畫成紅色、CSS改不了顏色，故不採用。 */
 .badge-over{font-size:12px;line-height:1;cursor:help;}
 /* 每個班別下的位置改成兩排(兩欄)顯示，善用格子寬度、也讓每欄的名字可以放大 */
 .role-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 4px;}
@@ -3628,7 +3630,7 @@ function renderCalendar(){
     else badges+=`<span style="font-size:9px;color:#c0392b">${dowNames[dow]}</span>`;
     // 某班別排超過角色人數設定的上限時，在日期旁加⚠(手動指派才可能發生，自動排班不會超排)
     const issDay=dayStaffIssues(dateStr);
-    if(issDay.over.length) badges+=`<span class="badge-over" title="${escAttr(dayStaffIssueText(issDay))}">⚠</span>`;
+    if(issDay.over.length) badges+=`<span class="badge-over" title="${escAttr(dayStaffIssueText(issDay))}">⚠️</span>`;
     const noteVal=(state.dayNotes&&state.dayNotes[dateStr])||'';
     cell.innerHTML=`<div class="day-header"><span class="day-num${isWknd?' weekend-num':''}">${day}</span><div class="day-badges">${badges}</div></div>`+
       `<input type="text" class="day-note-input" placeholder="" value="${escAttr(noteVal)}" onclick="event.stopPropagation()" onchange="updateDayNote('${dateStr}',this.value)" title="自由填寫備註，如訓練/評鑑等提醒事項">`;
@@ -3658,7 +3660,7 @@ function renderCalendar(){
         const lk=isPosLocked(dateStr,si.shift,nid)?'🔒':'';
         return `<div class="role-row"><span class="role-abbr" style="background:${nu.color}22;color:${nu.color}">${abbr}</span><span class="role-name" style="background:${nu.color}22;border:1px solid ${nu.color}70;color:${nu.color};${dim}${hl}" title="${role} ${nu.name}${lk?' (位置已鎖定)':''}">${lk}${nu.name}</span></div>`;
       }).join('');
-      block.innerHTML=`<div class="shift-block-hd"><span class="slot-tag ${si.tagClass}">${si.shift}</span><span class="shift-cnt${short?' short':''}${overHere?' over':''}"${overHere?` title="${escAttr(si.shift)}班排了${filled}人，超過上限${limitHere}人"`:''}>${filled}/${roles.length}${overHere?' ⚠':''}</span></div><div class="role-grid">${rows}</div>`;
+      block.innerHTML=`<div class="shift-block-hd"><span class="slot-tag ${si.tagClass}">${si.shift}</span><span class="shift-cnt${short?' short':''}${overHere?' over':''}"${overHere?` title="${escAttr(si.shift)}班排了${filled}人，超過上限${limitHere}人"`:''}>${filled}/${roles.length}${overHere?' ⚠️':''}</span></div><div class="role-grid">${rows}</div>`;
       cell.appendChild(block);
     }
 
@@ -4831,7 +4833,7 @@ function renderMasterGrid(){
     // 空缺與超排共用同一個黃色⚠、同一段具體說明(講明是哪一班)；兩種狀況同時發生時
     // 只顯示一個⚠(說明文字會兩件事一起講)，不重複掛兩個一樣的符號。
     const iss=dayStaffIssues(d);
-    const dayWarn=(iss.short.length||iss.over.length)?`<span title="${escAttr(dayStaffIssueText(iss))}" style="cursor:help">⚠</span>`:'';
+    const dayWarn=(iss.short.length||iss.over.length)?`<span title="${escAttr(dayStaffIssueText(iss))}" style="cursor:help">⚠️</span>`:'';
     return `<th class="${thClass}" onclick="mgSelectDate('${d}')" style="cursor:pointer" title="點擊反白此日期">${parseInt(d.slice(-2))}${dayWarn}<br>${dowNames[dow]}</th>`;
   }).join('')+`<th title="白班(D)天數，滿15天可包班">白</th><th title="小夜(E)天數，滿15天可包班">小</th><th title="大夜(N)天數，滿15天可包班">大</th><th>總班數</th><th>放假數</th><th>假日班數</th><th title="當月國定/例假日中放假的天數">假日休</th><th>總時數</th></tr>`;
   document.getElementById('master-thead').innerHTML=thead;
@@ -5032,7 +5034,7 @@ function renderWorkGrid(){
     const selNurseWorked=_wkSelNurse&&shiftOfNurseOnDate(_wkSelNurse,d);
     const cls=['dt',hol?'wknd wk-hol':'',colSel?'wk-col-active':'',selNurseWorked?'wk-glow':''].filter(Boolean).join(' ');
     const iss=dayStaffIssues(d);
-    const overWarn=iss.over.length?`<span title="${escAttr(dayStaffIssueText(iss))}" style="cursor:help">⚠</span>`:'';
+    const overWarn=iss.over.length?`<span title="${escAttr(dayStaffIssueText(iss))}" style="cursor:help">⚠️</span>`:'';
     return `<th class="${cls}" onclick="wkSelectDate('${d}')" style="cursor:pointer" title="點擊只顯示此日有上班的人">${parseInt(d.slice(-2))}${overWarn}<br>${dowNames[getDOW(d)]}</th>`;
   }).join('')
    +WORK_ROLE_CODES.map((r,i)=>`<th class="wk-sum${i===0?' wk-sep':''}" title="當月擔任「${r}」的天數">${ROLE_ABBR[r]}</th>`).join('')
