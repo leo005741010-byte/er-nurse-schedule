@@ -96,6 +96,9 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
 .tag-N{background:#f3e5f5;color:#6a1b9a;border:1px solid #ce93d8;}
 .shift-cnt{font-size:9px;color:#888;}
 .shift-cnt.short{color:#c0392b;font-weight:700;}
+.shift-cnt.over{color:#c62828;font-weight:800;background:#ffebee;border:1px solid #ef9a9a;border-radius:3px;padding:0 3px;}
+/* 日期上的「超排」提示❗：當天某班別排的人數超過角色人數設定的上限 */
+.badge-over{font-size:12px;font-weight:800;color:#c62828;line-height:1;cursor:help;}
 /* 每個班別下的位置改成兩排(兩欄)顯示，善用格子寬度、也讓每欄的名字可以放大 */
 .role-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 4px;}
 .role-row{display:flex;align-items:center;gap:3px;font-size:12px;line-height:18px;min-width:0;}
@@ -576,6 +579,7 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
         <li><b>批修時數</b>：輸入「班別＋時數」如 <code>D2</code>、<code>E0</code>，代表指派該班別但當天實際只上 2 小時／0 小時（用於部分請假被批修）。時數 0～7.5、以 0.5 為間隔。要還原時數，只要重新輸入班別本身（如 <code>E</code>）即可清除。</li>
         <li><b>手動鎖定</b>：<b>雙擊</b>格子可鎖定／解除鎖定該格（出現 ✋ 圖示）。鎖定後自動排班不會更動這一格。手動輸入或刪除班別本身不會鎖定，只有雙擊才會。</li>
         <li>人名旁 <code>[3N]</code> 之類標記＝上個月月底的連續班別（方便確認換月轉班）；格子左上紅色 ❗＝該人階級不符此角色（僅提示）。</li>
+        <li><b>日期表頭的提示</b>：黃色 <b style="color:#c9a227">⚠</b>＝當天一般班（D／E／N）還有<b>空缺</b>；紅色 <b style="color:#c0392b">❗</b>＝當天某班別<b>排超過「角色人數設定」的人數上限</b>（手動多排的人會被掛在「支援」位置）。<b>滑鼠移到符號上會直接講明是哪一班</b>，如「本日E班空缺」「本日N班超過上限」「本日D、N班空缺且E班超過上限」，並附各班實際人數。排班表（日曆）與工作總表的日期上也會同步顯示 ❗。</li>
         <li>點日期表頭可只顯示當天有上班的人；點人名可只顯示該人有上班的日期。</li>
       </ul>
 
@@ -3621,6 +3625,9 @@ function renderCalendar(){
     if(isManHol) badges+=`<span class="badge-hol" onclick="toggleHol('${dateStr}',event)" title="取消假日">假</span>`;
     else if(!isWknd) badges+=`<span class="badge-sethol" onclick="toggleHol('${dateStr}',event)" title="設為假日">設假</span>`;
     else badges+=`<span style="font-size:9px;color:#c0392b">${dowNames[dow]}</span>`;
+    // 某班別排超過角色人數設定的上限時，在日期旁加❗(手動指派才可能發生，自動排班不會超排)
+    const issDay=dayStaffIssues(dateStr);
+    if(issDay.over.length) badges+=`<span class="badge-over" title="${escAttr(dayStaffIssueText(issDay))}">❗</span>`;
     const noteVal=(state.dayNotes&&state.dayNotes[dateStr])||'';
     cell.innerHTML=`<div class="day-header"><span class="day-num${isWknd?' weekend-num':''}">${day}</span><div class="day-badges">${badges}</div></div>`+
       `<input type="text" class="day-note-input" placeholder="" value="${escAttr(noteVal)}" onclick="event.stopPropagation()" onchange="updateDayNote('${dateStr}',this.value)" title="自由填寫備註，如訓練/評鑑等提醒事項">`;
@@ -3631,6 +3638,10 @@ function renderCalendar(){
       const roles=getRoles(dateStr,si.shift);
       const filled=arr.filter(Boolean).length;
       const short=filled<roles.length;
+      // 超排：實際人數 > 角色人數設定的上限(多的人掛在支援格，格數也會跟著變多，
+      // 因此 filled/roles.length 看起來會是滿的，要另外比對上限才看得出來)
+      const limitHere=getRoleTemplate(si.shift).length;
+      const overHere=filled>limitHere;
       const block=document.createElement('div');
       block.className='shift-block';
       // 兩欄顯示的順序依位置排(A1→檢→A2→A3→B→B)：左上A1右上檢、左中A2右中A3、最下兩格B。
@@ -3646,7 +3657,7 @@ function renderCalendar(){
         const lk=isPosLocked(dateStr,si.shift,nid)?'🔒':'';
         return `<div class="role-row"><span class="role-abbr" style="background:${nu.color}22;color:${nu.color}">${abbr}</span><span class="role-name" style="background:${nu.color}22;border:1px solid ${nu.color}70;color:${nu.color};${dim}${hl}" title="${role} ${nu.name}${lk?' (位置已鎖定)':''}">${lk}${nu.name}</span></div>`;
       }).join('');
-      block.innerHTML=`<div class="shift-block-hd"><span class="slot-tag ${si.tagClass}">${si.shift}</span><span class="shift-cnt${short?' short':''}">${filled}/${roles.length}</span></div><div class="role-grid">${rows}</div>`;
+      block.innerHTML=`<div class="shift-block-hd"><span class="slot-tag ${si.tagClass}">${si.shift}</span><span class="shift-cnt${short?' short':''}${overHere?' over':''}"${overHere?` title="${escAttr(si.shift)}班排了${filled}人，超過上限${limitHere}人"`:''}>${filled}/${roles.length}${overHere?' ❗':''}</span></div><div class="role-grid">${rows}</div>`;
       cell.appendChild(block);
     }
 
@@ -4816,8 +4827,12 @@ function renderMasterGrid(){
     const colSel=_mgSelDate===d;
     const selNurseWorked=_mgSelNurse&&shiftOfNurseOnDate(_mgSelNurse,d);
     const thClass=['dt',wknd?'wknd':'',colSel?'mg-col-active':'',selNurseWorked?'mg-glow':''].filter(Boolean).join(' ');
-    const emptyWarn=dateHasEmptySlot(d)?`<span title="本日仍有一般班(D/E/N)空缺" style="color:#ffeb3b">⚠</span>`:'';
-    return `<th class="${thClass}" onclick="mgSelectDate('${d}')" style="cursor:pointer" title="點擊反白此日期">${parseInt(d.slice(-2))}${emptyWarn}<br>${dowNames[dow]}</th>`;
+    // 空缺⚠與超排❗兩個標記共用同一段具體說明(講明是哪一班)，滑到哪一個都看得到全貌
+    const iss=dayStaffIssues(d);
+    const issTitle=escAttr(dayStaffIssueText(iss));
+    const emptyWarn=iss.short.length?`<span title="${issTitle}" style="color:#ffeb3b">⚠</span>`:'';
+    const overWarn=iss.over.length?`<span title="${issTitle}" style="color:#ff5252;font-weight:800">❗</span>`:'';
+    return `<th class="${thClass}" onclick="mgSelectDate('${d}')" style="cursor:pointer" title="點擊反白此日期">${parseInt(d.slice(-2))}${emptyWarn}${overWarn}<br>${dowNames[dow]}</th>`;
   }).join('')+`<th title="白班(D)天數，滿15天可包班">白</th><th title="小夜(E)天數，滿15天可包班">小</th><th title="大夜(N)天數，滿15天可包班">大</th><th>總班數</th><th>放假數</th><th>假日班數</th><th title="當月國定/例假日中放假的天數">假日休</th><th>總時數</th></tr>`;
   document.getElementById('master-thead').innerHTML=thead;
 
@@ -5016,7 +5031,9 @@ function renderWorkGrid(){
     const colSel=_wkSelDate===d;
     const selNurseWorked=_wkSelNurse&&shiftOfNurseOnDate(_wkSelNurse,d);
     const cls=['dt',hol?'wknd wk-hol':'',colSel?'wk-col-active':'',selNurseWorked?'wk-glow':''].filter(Boolean).join(' ');
-    return `<th class="${cls}" onclick="wkSelectDate('${d}')" style="cursor:pointer" title="點擊只顯示此日有上班的人">${parseInt(d.slice(-2))}<br>${dowNames[getDOW(d)]}</th>`;
+    const iss=dayStaffIssues(d);
+    const overWarn=iss.over.length?`<span title="${escAttr(dayStaffIssueText(iss))}" style="color:#ff5252;font-weight:800">❗</span>`:'';
+    return `<th class="${cls}" onclick="wkSelectDate('${d}')" style="cursor:pointer" title="點擊只顯示此日有上班的人">${parseInt(d.slice(-2))}${overWarn}<br>${dowNames[getDOW(d)]}</th>`;
   }).join('')
    +WORK_ROLE_CODES.map((r,i)=>`<th class="wk-sum${i===0?' wk-sep':''}" title="當月擔任「${r}」的天數">${ROLE_ABBR[r]}</th>`).join('')
    +`<th class="wk-sum wk-sep">總班數</th><th class="wk-sum">放假數</th><th class="wk-sum" title="當月假日中有上班的天數">假日班</th></tr>`;
@@ -5254,11 +5271,40 @@ function normalizeMonthRoles(y,m){
   finally{ _normalizing=false; }
   return changed;
 }
-// 該日是否仍有一般班(D/E/N)空缺，供月班總表在日期上直接顯示提示(不必等自動排班的toast或
-// 統計報表才看得到)。有D12/N12的12小時特班日因角色格數已收斂為僅剩已指派人數，不會有空缺。
-function dateHasEmptySlot(dateStr){
-  const ds=state.schedule[dateStr]; if(!ds) return false;
-  return SHIFTS.some(sh=>(ds[sh]||[]).some(x=>!x));
+// 該日一般班(D/E/N)的人力異常摘要，逐班別分開判斷，讓日期上的提示能指名道姓
+// (如「本日D、N班空缺且E班超過上限」)，而不是只講「有空缺」讓人自己找。
+//   空缺 = 該班別還有沒排到人的格子
+//   超過上限 = 實際排入人數 > 角色人數設定的該班別總人數。自動排班不會超排，但手動指派
+//   (月班總表輸入D/E/N、日期編輯視窗新增人員)在標準格已滿時會直接補一個「支援」格放人、
+//   系統不會擋，不看工作總表很難發現。
+// 有D12/N12(12小時特班)的日子一般班格數已被收斂為0，兩者皆不適用。
+function dayStaffIssues(dateStr){
+  const short=[], over=[];
+  const ds=state.schedule[dateStr];
+  if(!ds) return {short,over};
+  if((ds.D12&&ds.D12.length)||(ds.N12&&ds.N12.length)) return {short,over};
+  for(const sh of SHIFTS){
+    const arr=ds[sh]||[];
+    const filled=arr.filter(Boolean).length;
+    const slots=((ds.roles&&ds.roles[sh])||[]).length;
+    const limit=getRoleTemplate(sh).length;
+    if(arr.some(x=>!x)) short.push({shift:sh,filled,slots});
+    if(filled>limit) over.push({shift:sh,filled,limit});
+  }
+  return {short,over};
+}
+// 上述摘要 → 提示文字。第一行是重點(哪幾班怎麼了)，第二行補人數細節。
+function dayStaffIssueText(iss){
+  if(!iss||(!iss.short.length&&!iss.over.length)) return '';
+  const parts=[];
+  if(iss.short.length) parts.push(`${iss.short.map(o=>o.shift).join('、')}班空缺`);
+  if(iss.over.length) parts.push(`${iss.over.map(o=>o.shift).join('、')}班超過上限`);
+  const detail=[
+    ...iss.short.map(o=>`${o.shift}班${o.filled}/${o.slots}人(缺${o.slots-o.filled}人)`),
+    ...iss.over.map(o=>`${o.shift}班排${o.filled}人(上限${o.limit}人，多${o.filled-o.limit}人)`)
+  ];
+  return `本日${parts.join('且')}\n${detail.join('；')}`
+    +(iss.over.length?'\n超出上限的人會掛在「支援」位置，請確認是否刻意加人。':'');
 }
 // 月班總表手動編輯：
 //   輸入 D/E/N → 指派一般班別(留空代表OFF)；輸入 D12/N12 → 指派12小時特殊班(手動排列，
