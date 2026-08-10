@@ -307,6 +307,7 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
 </style>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 </head>
 <body>
@@ -375,9 +376,9 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
         </div>
         <div class="split-control">
           <label title="N-OFF-D不可出現；同班次不可全為男性；支援規則：D→E、E→D/N、N→E(上月D轉N者於本月第一個N班前可先上D)；休假天數落在4個相鄰數字，資深&gt;大夜&gt;資淺；休假最多者必為資深、上最多班者必為資淺；不可OFF-上1天班-OFF">最多連上：</label>
-          D<input type="number" id="max-consec-D" min="1" style="width:40px" onchange="pushUndo();state.maxConsecByShift.D=parseInt(this.value)||5;autoSave();">
-          E<input type="number" id="max-consec-E" min="1" style="width:40px" onchange="pushUndo();state.maxConsecByShift.E=parseInt(this.value)||5;autoSave();">
-          N<input type="number" id="max-consec-N" min="1" style="width:40px" onchange="pushUndo();state.maxConsecByShift.N=parseInt(this.value)||4;autoSave();">
+          D<input type="number" id="max-consec-D" min="1" max="6" style="width:40px" onchange="pushUndo();state.maxConsecByShift.D=Math.min(6,parseInt(this.value)||5);autoSave();">
+          E<input type="number" id="max-consec-E" min="1" max="6" style="width:40px" onchange="pushUndo();state.maxConsecByShift.E=Math.min(6,parseInt(this.value)||5);autoSave();">
+          N<input type="number" id="max-consec-N" min="1" max="6" style="width:40px" onchange="pushUndo();state.maxConsecByShift.N=Math.min(6,parseInt(this.value)||4);autoSave();">
           <span>天（可自行填選，無上限）</span>
         </div>
       </div>
@@ -1244,6 +1245,12 @@ function addDays(dateStr,n){
 function isWeekend(dateStr){const dow=getDOW(dateStr);return dow===5||dow===6;}
 function isHoliday(dateStr){return state.holidays.has(dateStr)||isWeekend(dateStr);}
 function monthDates(y,m){const a=[];for(let d=1;d<=daysInMonth(y,m);d++)a.push(fmtDate(y,m,d));return a;}
+// 唯讀用途的「某月所有日期」快取。供「本月是否已排過X班」「本月班別種類/轉班次數/工作日數」等
+// 高頻查詢使用，取代原本每次呼叫都 Object.keys(整份歷史班表)+startsWith 過濾的作法
+// (資料累積兩三年後，排班會從十幾秒變成數分鐘)。掃描範圍與原本完全相同(就是該月的每一天)，
+// 因此排班結果不受影響。回傳的陣列是共用實體，呼叫端【不可】修改。
+const _monthDatesCache={};
+function monthDatesRO(y,m){const k=y+'-'+m;return _monthDatesCache[k]||(_monthDatesCache[k]=monthDates(y,m));}
 function hoursBetween(d1,h1,d2,h2){
   const a=new Date(d1+'T00:00:00Z').getTime()+h1*3600000;
   const b=new Date(d2+'T00:00:00Z').getTime()+h2*3600000;
@@ -1300,30 +1307,44 @@ function getRoles(dateStr,shift){
 // ============================================================
 // ELIGIBILITY
 // ============================================================
+// 效能：原本每次呼叫都 Object.keys(整份歷史班表)+sort，排班內層迴圈大量呼叫，
+// 資料累積兩三年後排班會從十幾秒變成數分鐘。改為從目標日往前/往後逐日走訪，
+// 找到第一筆就回傳(通常1~3步)，並限制掃描窗為 60 天。
+// 60 天足以涵蓋整個相鄰月份：所有使用者(restOK 休息時數、scoreNurse 班別連續性加分、
+// 勞基法輪班間隔檢查)實際需要的最大距離都只有「相鄰的上一/下一個上班日」，
+// 一個人連續 60 天完全沒有任何班次時，這些判斷本來就不會再有任何作用。
+const _SCAN_WINDOW_DAYS=60;
 function getLastAssigned(nurseId, beforeDate, sched){
-  const dates=Object.keys(sched).filter(d=>d<beforeDate).sort();
-  let last=null;
-  for(const d of dates){
-    const ds=sched[d];
-    for(const sh of SHIFTS){
-      if((ds[sh]||[]).includes(nurseId)) last={date:d,shift:sh};
+  let cur=addDays(beforeDate,-1);
+  for(let i=0;i<_SCAN_WINDOW_DAYS;i++){
+    const ds=sched[cur];
+    if(ds){
+      let found=null;
+      for(const sh of SHIFTS){
+        if((ds[sh]||[]).includes(nurseId)) found={date:cur,shift:sh};
+      }
+      for(const sh of MANUAL_SHIFTS){
+        if((ds[sh]||[]).includes(nurseId)) found={date:cur,shift:sh};
+      }
+      if(found) return found;
     }
-    for(const sh of MANUAL_SHIFTS){
-      if((ds[sh]||[]).includes(nurseId)) last={date:d,shift:sh};
-    }
+    cur=addDays(cur,-1);
   }
-  return last;
+  return null;
 }
 function getNextAssigned(nurseId, afterDate, sched){
-  const dates=Object.keys(sched).filter(d=>d>afterDate).sort();
-  for(const d of dates){
-    const ds=sched[d];
-    for(const sh of SHIFTS){
-      if((ds[sh]||[]).includes(nurseId)) return {date:d,shift:sh};
+  let cur=addDays(afterDate,1);
+  for(let i=0;i<_SCAN_WINDOW_DAYS;i++){
+    const ds=sched[cur];
+    if(ds){
+      for(const sh of SHIFTS){
+        if((ds[sh]||[]).includes(nurseId)) return {date:cur,shift:sh};
+      }
+      for(const sh of MANUAL_SHIFTS){
+        if((ds[sh]||[]).includes(nurseId)) return {date:cur,shift:sh};
+      }
     }
-    for(const sh of MANUAL_SHIFTS){
-      if((ds[sh]||[]).includes(nurseId)) return {date:d,shift:sh};
-    }
+    cur=addDays(cur,1);
   }
   return null;
 }
@@ -1379,7 +1400,9 @@ function consecCapFor(nurseId,date){
     const nc=maxConsecOf(nurseId);
     if(nc) cap=Math.min(nc,6);
   }
-  return cap;
+  // 全域「最多連上」輸入框沒有上限夾制，填 7 以上就會排出違反勞基法七休一的連班。
+  // 個人設定原本就已夾在 6 天以內，這裡把全域值一併夾住，讓 6 天成為系統的絕對硬上限。
+  return Math.min(cap,6);
 }
 function wouldExceedConsec(nurseId,date,sched){
   let back=0, cur=addDays(date,-1);
@@ -1498,9 +1521,8 @@ function isNtoDTransition(nurseId,date){
 // 本月 date 之前是否已排過 N 班
 function hasNBeforeInMonth(nurseId,date,sched){
   const{y,m}=ymFromDate(date);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)||d>=date) continue;
+  for(const d of monthDatesRO(y,m)){
+    if(d>=date) continue;
     if((((sched[d]||{}).N)||[]).includes(nurseId)) return true;
   }
   return false;
@@ -1508,9 +1530,8 @@ function hasNBeforeInMonth(nurseId,date,sched){
 // 本月 date 之前是否已排過 D 班
 function hasDBeforeInMonth(nurseId,date,sched){
   const{y,m}=ymFromDate(date);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)||d>=date) continue;
+  for(const d of monthDatesRO(y,m)){
+    if(d>=date) continue;
     if((((sched[d]||{}).D)||[]).includes(nurseId)) return true;
   }
   return false;
@@ -1518,9 +1539,8 @@ function hasDBeforeInMonth(nurseId,date,sched){
 // 本月 date (含)之後是否已有 D 班
 function hasDOnOrAfterInMonth(nurseId,date,sched){
   const{y,m}=ymFromDate(date);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)||d<date) continue;
+  for(const d of monthDatesRO(y,m)){
+    if(d<date) continue;
     if((((sched[d]||{}).D)||[]).includes(nurseId)) return true;
   }
   return false;
@@ -1528,9 +1548,8 @@ function hasDOnOrAfterInMonth(nurseId,date,sched){
 // 本月 date (含)之後是否已有 N 班
 function hasNOnOrAfterInMonth(nurseId,date,sched){
   const{y,m}=ymFromDate(date);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)||d<date) continue;
+  for(const d of monthDatesRO(y,m)){
+    if(d<date) continue;
     if((((sched[d]||{}).N)||[]).includes(nurseId)) return true;
   }
   return false;
@@ -1539,10 +1558,8 @@ function hasNOnOrAfterInMonth(nurseId,date,sched){
 // 作息負擔過大。回傳該人本月(sched中)已出現的不同一般班別集合(不含D12/N12特殊班)。
 function shiftTypesInMonth(nurseId,dateStr,sched){
   const{y,m}=ymFromDate(dateStr);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
   const set=new Set();
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)) continue;
+  for(const d of monthDatesRO(y,m)){
     for(const sh of SHIFTS){ if((((sched[d]||{})[sh])||[]).includes(nurseId)){ set.add(sh); break; } }
   }
   return set;
@@ -1563,10 +1580,8 @@ function wouldExceed2ShiftTypes(nurseId,dateStr,shift,sched){
 const MAX_TRANSITIONS=4;
 function monthTransitionCount(nurseId,dateStr,sched,extraDate,extraShift){
   const{y,m}=ymFromDate(dateStr);
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
   const map={};
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)) continue;
+  for(const d of monthDatesRO(y,m)){
     for(const sh of SHIFTS){ if((((sched[d]||{})[sh])||[]).includes(nurseId)){ map[d]=sh; break; } }
   }
   if(extraDate&&extraShift&&SHIFTS.includes(extraShift)) map[extraDate]=extraShift; // 假設性指派
@@ -1635,10 +1650,8 @@ function moveWouldIsolate(giverId,takerId,date,sched){
 // 這裡做「上限」把關：一旦已達目標工作日數就不得再被排班(避免休假變少)；
 // 不足的部分由 enforceLongLeaveExactDays 補滿(避免休假變多)。
 function monthWorkDayCount(nurseId,y,m,sched){
-  const pref=`${y}-${String(m+1).padStart(2,'0')}`;
   let n=0;
-  for(const d of Object.keys(sched)){
-    if(!d.startsWith(pref)) continue;
+  for(const d of monthDatesRO(y,m)){
     if(isAssignedThatDay(nurseId,d,sched)) n++;
   }
   return n;
@@ -1743,6 +1756,10 @@ function calcNurseHolCount(nurseId, sched){
   for(const[d,ds] of Object.entries(sched)){
     if(!isHoliday(d)) continue;
     for(const sh of SHIFTS) if((ds[sh]||[]).includes(nurseId)) n++;
+    // D12/N12(12小時特班)與H(行政班)先前未計入「假日班數」，導致假日上12小時特班的人
+    // 在假日公平性平衡中被當成沒上假日班，與 calcNurseShiftCount 採計 MANUAL_SHIFTS 的
+    // 邏輯保持一致，一併納入。
+    for(const sh of MANUAL_SHIFTS) if((ds[sh]||[]).includes(nurseId)) n++;
   }
   return n;
 }
@@ -1937,7 +1954,7 @@ function balanceOffDays(newSched, fullSched, dates){
           // 用鏈式指派多爭取一次機會；跨班別(Phase C/D的cross分支)則卡關多為休息時數
           // 衝突(N/D作息完全相反)，連鎖挪動無法解決該類物理限制，故不在那些分支套用，
           // 避免白白增加運算量。
-          if(tryChainAssign(u.id,d,homeShift,role,newSched,fullSched,true)){
+          if(tryChainAssign(u.id,d,homeShift,role,newSched,fullSched,true,counts)){
             arr[i]=u.id; counts[u.id]++; counts[occ]--; progressed=true;
             if(counts[u.id]>=lo) break outerB;
           } else {
@@ -1998,7 +2015,7 @@ function balanceOffDays(newSched, fullSched, dates){
           const sameGroup=homeOf(r)===homeShiftO;
           // 同班次時卡關多為連班上限，值得用鏈式指派多爭取一次；跨班別支援時卡關多為
           // 休息時數衝突(連鎖挪動解決不了)，直接用 canWorkSupport 判斷即可，避免空耗運算。
-          const ok=sameGroup?tryChainAssign(r.id,d,homeShiftO,role,newSched,fullSched,true)
+          const ok=sameGroup?tryChainAssign(r.id,d,homeShiftO,role,newSched,fullSched,true,counts)
                              :canWorkSupport(r.id,d,homeShiftO,role,fullSched);
           if(ok){
             arr[idx]=r.id; counts[o.id]--; counts[r.id]++; progressed=true;
@@ -2186,14 +2203,16 @@ function tryRelocateOccupant(nurseId, date, shift, role, newSched, fullSched){
   const scored=candidates.map(doc=>({id:doc.id,sc:scoreNurse(doc.id,date,shift,role,newSched)}));
   scored.sort((a,b)=>b.sc-a.sc);
   arr[idx]=scored[0].id;
-  return true;
+  return scored[0].id; // 回傳「接收這個班次的第三人」id，讓呼叫端能同步更新 counts(否則收斂判斷會失準)
 }
 // 鏈式指派：休假天數平衡的轉調搜尋專用。先試直接指派(本班別或跨班別支援)；
 // 若唯一卡關原因是「連續上班天數上限」(其餘鐵則皆已通過)，比照 repairAndFillSlot
 // 的「情況一」，先把候選人鄰近一天既有的班次挪給別人騰出空間，再重試指派——
 // 讓休假天數平衡不再侷限於「純1對1直接swap」，能多繞一手，收斂到更接近
 // 「只剩相鄰兩個數字」的鐵則要求。挪動失敗則還原，不留副作用。
-function tryChainAssign(nurseId, date, shift, role, newSched, fullSched, homeMatch){
+// counts(選填)：休假天數平衡用的班數統計表。連鎖挪動會讓「被挪走班次的本人(nurseId)」少1班、
+// 「接手該班次的第三人」多1班，若不同步更新，該輪的 under/over 判斷與收斂效率都會失準。
+function tryChainAssign(nurseId, date, shift, role, newSched, fullSched, homeMatch, counts){
   const direct = homeMatch
     ? (canWork(nurseId,date,shift,role,fullSched)||canWorkForce(nurseId,date,shift,role,fullSched))
     : canWorkSupport(nurseId,date,shift,role,fullSched);
@@ -2220,13 +2239,19 @@ function tryChainAssign(nurseId, date, shift, role, newSched, fullSched, homeMat
   const nextSlot=findSlotOccupant(nurseId,nextDay,newSched);
   const boundaries=[prevSlot?{...prevSlot,date:prevDay}:null, nextSlot?{...nextSlot,date:nextDay}:null].filter(Boolean);
   const relocated=[];
+  const bump=(id,delta)=>{ if(counts&&id&&counts[id]!==undefined) counts[id]+=delta; };
   for(const b of boundaries){
-    if(tryRelocateOccupant(nurseId,b.date,b.shift,b.role,newSched,fullSched)){
-      relocated.push(b);
+    const recvId=tryRelocateOccupant(nurseId,b.date,b.shift,b.role,newSched,fullSched);
+    if(recvId){
+      relocated.push({...b,recvId});
+      bump(recvId,1); bump(nurseId,-1); // 接收者多1班、本人在該日的班被挪走少1班
       if(!wouldExceedConsec(nurseId,date,fullSched)) return true;
     }
   }
-  for(const b of relocated){ newSched[b.date][b.shift][b.idx]=nurseId; }
+  for(const b of relocated){
+    newSched[b.date][b.shift][b.idx]=nurseId;
+    bump(b.recvId,-1); bump(nurseId,1); // 還原挪動，counts 一併回復
+  }
   return false;
 }
 function repairAndFillSlot(newSched, fullSched, dates, date, shift, roleIdx){
@@ -2280,21 +2305,42 @@ function repairAndFillSlot(newSched, fullSched, dates, date, shift, roleIdx){
 
   // 情況二：唯一卡關原因是N-OFF-D——若前一天(N後的休息日)有空缺職位可讓他頂上，
   // 他就不再是「N後OFF」，鐵則自然不再擋他，事後再讓他來補今天的空缺。
+  // ⚠ 這一段會「額外把人塞進前一天 d1」，因此 d1 這一天本身也必須通過全部鐵則
+  // (預假OFF／在職期間／支援矩陣／連班上限／不能同時上班／位置優先／轉班順序)，
+  // 而且塞入 d1 之後 date 當天的休息時數必須「重算」——baseEligible 的 restOK 是塞入前算的，
+  // 若不重算就會出現「d1 上N(隔天08:00下班)、date 上D(08:00上班)」休息0小時、
+  // 甚至直接蓋掉 d1 的預假這種嚴重違規。任何一項不過就還原 d1 的填入。
   const nOffDBlocked=state.doctors.filter(doc=>baseEligible(doc)&&!wouldExceedConsec(doc.id,date,fullSched)&&violatesNOffD(doc.id,date,shift,fullSched));
   for(const doc of nOffDBlocked){
     const d1=addDays(date,-1);
     const ds1=newSched[d1]; if(!ds1) continue;
+    if(offBlocked(doc.id,d1)) continue;                 // 預假OFF：絕不可被犧牲
+    if(!isEmployedOnDate(doc.id,d1)) continue;          // 不在職期間
+    if(isAssignedThatDay(doc.id,d1,newSched)) continue; // 當天已有班(理論上不會，保險)
+    if(avoidBlocked(doc.id,d1,fullSched)) continue;     // 「不能同時上班」硬性限制
     let filledSlot=null;
     outer:
     for(const sh1 of SHIFTS){
       const arr1=ds1[sh1]; const roles1=ds1.roles[sh1];
+      if(!arr1||!roles1) continue;
+      if(supportShiftBlocked(doc.id,d1,sh1,fullSched)) continue;      // 支援矩陣鐵則
+      if(violatesDtoNOrder(doc.id,d1,sh1,fullSched)) continue;        // D轉N順序鐵則
+      if(violatesNtoDOrder(doc.id,d1,sh1,fullSched)) continue;        // N轉D順序鐵則
+      if(violatesNOffD(doc.id,d1,sh1,fullSched)) continue;            // d1 本身也不可 N-OFF-D
+      if(getNurseShiftTypeAtDate(doc.id,d1)!==sh1 && doc.prefs.allowSupport===false) continue;
+      if(!restOK(doc.id,d1,sh1,fullSched)) continue;
+      if(wouldExceedConsec(doc.id,d1,fullSched)) continue;            // 連班上限(含七休一)
       for(let j=0;j<arr1.length;j++){
         if(arr1[j]) continue;
         const role1=roles1[j];
         if(!roleAllowed(doc.prefs.level,role1)) continue;
-        if(!restOK(doc.id,d1,sh1,fullSched)) continue;
+        if(rolePrefBlocksRole(doc.id,d1,role1)) continue;             // 位置優先為強制
         arr1[j]=doc.id;
-        if(!violatesNOffD(doc.id,date,shift,fullSched)){ filledSlot={sh1,j}; break outer; }
+        // 塞入 d1 後才重新檢查 date 當天：N-OFF-D 是否真的解開、休息時數是否仍足夠、
+        // 連班天數是否被這一天推爆。三者皆過才算成立。
+        if(!violatesNOffD(doc.id,date,shift,fullSched)
+           && restOK(doc.id,date,shift,fullSched)
+           && !wouldExceedConsec(doc.id,date,fullSched)){ filledSlot={sh1,j}; break outer; }
         arr1[j]=null;
       }
     }
@@ -3293,8 +3339,36 @@ function generateScheduleAttempt(y,m,dates){
 //  2) 孤立單班數(OFF-上班-OFF，使用者要求不可出現)
 //  3) 休假最多者是否為資深(違反＝最少班數者含資淺，記為 1)
 //  4) 班數全距(越小越集中；使用者可接受到4種相鄰數字，即全距<=3)
+// 預班(WORK_D/E/N)未真正被排入該日該班別的件數，越少越好——列在「與空班同級或僅次之」
+// 的最高優先序，因為使用者在「預假/預班」分頁登記的預上班等同使用者手動指定，排不進去
+// 等同一種「空缺」，先前完全沒有評分/提醒，容易讓使用者誤以為已經生效。
+function countWorkPrereqMiss(newSched,y,m){
+  let miss=0;
+  for(const dt of monthDates(y,m)){
+    for(const pr of (state.preRequests[dt]||[])){
+      if(!pr.type||!pr.type.startsWith('WORK_')) continue;
+      const sh=pr.type.slice(5);
+      const arr=newSched[dt]&&newSched[dt][sh];
+      if(!arr||!arr.includes(pr.docId)) miss++;
+    }
+  }
+  return miss;
+}
+function listWorkPrereqMiss(newSched,y,m){
+  const out=[];
+  for(const dt of monthDates(y,m)){
+    for(const pr of (state.preRequests[dt]||[])){
+      if(!pr.type||!pr.type.startsWith('WORK_')) continue;
+      const sh=pr.type.slice(5);
+      const arr=newSched[dt]&&newSched[dt][sh];
+      if(!arr||!arr.includes(pr.docId)) out.push(`${dt.slice(5)} ${getDocName(pr.docId)}(排${sh})`);
+    }
+  }
+  return out;
+}
 function scheduleQuality(newSched,y,m){
   const empty=countEmpty(newSched);
+  const workPrereqMiss=countWorkPrereqMiss(newSched,y,m);
   const parts=state.doctors.filter(d=>d.type==='full'&&isFullMonthParticipant(d.id,y,m));
   const counts=parts.map(d=>calcNurseShiftCount(d.id,newSched));
   const spread=counts.length?Math.max(...counts)-Math.min(...counts):0;
@@ -3402,11 +3476,13 @@ function scheduleQuality(newSched,y,m){
       prefMiss+=wr.filter(x=>x<=2).length;     // 太短的上班段
     }
   }
-  return {empty,longLeaveMiss,pairViolations,isolated,threeShiftTypes,transitionExcess,seniorityViolations,maxOffNotSenior,maxShiftNotJunior,seniorityInversions,spread,prefMiss};
+  return {empty,workPrereqMiss,longLeaveMiss,pairViolations,isolated,threeShiftTypes,transitionExcess,seniorityViolations,maxOffNotSenior,maxShiftNotJunior,seniorityInversions,spread,prefMiss};
 }
 function isQualityBetter(q,best){
   if(!best) return true;
   if(q.empty!==best.empty) return q.empty<best.empty;
+  // 預班(WORK_D/E/N)未達成數：與空班同級或僅次之的最高優先序。
+  if(q.workPrereqMiss!==best.workPrereqMiss) return q.workPrereqMiss<best.workPrereqMiss;
   if(q.longLeaveMiss!==best.longLeaveMiss) return q.longLeaveMiss<best.longLeaveMiss;
   // 強制配對限制違反天數(僅次於空班與指定休假天數)
   if(q.pairViolations!==best.pairViolations) return q.pairViolations<best.pairViolations;
@@ -3467,7 +3543,7 @@ async function autoSchedule(){
     usedAttempts=attempt+1;
     // 達到理想(零空班、長假天數精準命中、無孤立單班、最少班者為資深、最多班者為資淺、
     // 班數全距<=1)即提早停止
-    if(bestQ.empty===0&&bestQ.longLeaveMiss===0&&bestQ.pairViolations===0&&bestQ.isolated===0&&bestQ.threeShiftTypes===0&&bestQ.transitionExcess===0&&bestQ.seniorityViolations===0&&bestQ.seniorityInversions===0&&bestQ.spread<=1) break;
+    if(bestQ.empty===0&&bestQ.workPrereqMiss===0&&bestQ.longLeaveMiss===0&&bestQ.pairViolations===0&&bestQ.isolated===0&&bestQ.threeShiftTypes===0&&bestQ.transitionExcess===0&&bestQ.seniorityViolations===0&&bestQ.seniorityInversions===0&&bestQ.spread<=1) break;
   }
   if(showProg){ overlay.classList.remove('show'); }
 
@@ -3479,6 +3555,10 @@ async function autoSchedule(){
   // 改為同時寫進頁籤列上方的常駐橫幅(按✕或下次排班才消失)，toast 也改為點一下才關。
   const msgs=[];
   if(bestQ.empty>0) msgs.push(`❌ <b>${bestQ.empty} 個職位無法排入</b>：即使連鎖調整仍排不進去(人力總量不足)，維持空班。`);
+  if(bestQ.workPrereqMiss>0){
+    const missList=listWorkPrereqMiss(best,y,m);
+    msgs.push(`⚠ <b>${bestQ.workPrereqMiss} 筆預班(排D/E/N)未排入</b>：${missList.slice(0,8).join('、')}${missList.length>8?` 等共${missList.length}筆`:''}，通常是格數已滿或撞到其他鐵則。`);
+  }
   if(bestQ.longLeaveMiss>0) msgs.push(`⚠ <b>指定休假天數未完全達成</b>：「不在預假限制天數人員」的休假天數與設定值合計差 ${bestQ.longLeaveMiss} 天。通常是為了「不留空班」或受連班上限/孤立單班等鐵則所限。`);
   if(bestQ.pairViolations>0) msgs.push(`⚠ <b>強制配對限制有 ${bestQ.pairViolations} 天未達成</b>：通常是當天兩人都已達連班上限等更高階鐵則所致，請至統計報表查看是哪幾天。`);
   if(bestQ.seniorityViolations>0) msgs.push(`⚠ <b>資深/資淺原則未完全符合</b>：休假最多者有 ${bestQ.maxOffNotSenior} 位資淺、上最多班者有 ${bestQ.maxShiftNotJunior} 位資深，受連班上限/孤立單班/N不能貼D等鐵則所限。`);
@@ -4068,10 +4148,58 @@ function saveDoc(){
   showToast('✅ 已儲存');
 }
 function deleteDoc(id){
-  if(!confirm('確定刪除此護理師？其已排入的班別將維持顯示但需手動清除。')) return;
+  // 掃描該護理師在哪些月份還有排班或預假/預班紀錄，讓使用者確認清楚刪除範圍後才動手，
+  // 避免刪除人員設定後，各處(班表/預假/位置鎖定/配對規則/順序等)留下對應不到人的「幽靈id」。
+  const monthsWithSched=new Set();
+  for(const[d,ds] of Object.entries(state.schedule)){
+    let hit=false;
+    for(const sh of SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
+    for(const sh of MANUAL_SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
+    if(hit) monthsWithSched.add(d.slice(0,7));
+  }
+  const monthsWithPR=new Set();
+  for(const[d,prs] of Object.entries(state.preRequests)){
+    if((prs||[]).some(p=>p.docId===id)) monthsWithPR.add(d.slice(0,7));
+  }
+  const months=[...new Set([...monthsWithSched,...monthsWithPR])].sort();
+  const name=getDocName(id);
+  const detail=months.length?`\n\n此人於以下月份仍有排班或預假/預班紀錄，將一併清除：\n${months.join('、')}`:'';
+  if(!confirm(`確定刪除護理師「${name}」？${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
   pushUndo();
+  // 清除各處對這個人的參照，避免留下對應不到人的「幽靈id」
+  for(const ds of Object.values(state.schedule)){
+    for(const sh of SHIFTS){ const arr=ds[sh]; if(!arr) continue; for(let i=0;i<arr.length;i++) if(arr[i]===id) arr[i]=null; }
+    for(const sh of MANUAL_SHIFTS){ if(Array.isArray(ds[sh])) ds[sh]=ds[sh].filter(x=>x!==id); }
+  }
+  for(const d of Object.keys(state.preRequests)){
+    state.preRequests[d]=state.preRequests[d].filter(p=>p.docId!==id);
+    if(!state.preRequests[d].length) delete state.preRequests[d];
+  }
+  state.posLocks=(state.posLocks||[]).filter(l=>l.nurseId!==id);
+  state.pairRules=(state.pairRules||[]).filter(r=>r.a!==id&&r.b!==id);
+  state.avoidPairs=(state.avoidPairs||[]).filter(p=>p[0]!==id&&p[1]!==id);
+  if(state.nurseOrder) delete state.nurseOrder[id];
+  for(const k of Object.keys(state.longLeaveExempt||{})){
+    state.longLeaveExempt[k]=(state.longLeaveExempt[k]||[]).filter(x=>x!==id);
+  }
+  for(const k of Object.keys(state.longLeaveDays||{})){
+    if(state.longLeaveDays[k]) delete state.longLeaveDays[k][id];
+  }
+  for(const k of Object.keys(state.monthlyShiftType||{})){
+    if(state.monthlyShiftType[k]) delete state.monthlyShiftType[k][id];
+  }
+  for(const k of Object.keys(state.monthlyRolePref||{})){
+    if(state.monthlyRolePref[k]) delete state.monthlyRolePref[k][id];
+  }
+  for(const k of Object.keys(state.workDateRange||{})){
+    if(state.workDateRange[k]) delete state.workDateRange[k][id];
+  }
+  for(const d of Object.keys(state.hourAdjust||{})){
+    if(state.hourAdjust[d]) delete state.hourAdjust[d][id];
+  }
   state.doctors=state.doctors.filter(x=>x.id!==id);
-  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid();
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`🗑️ 已刪除護理師「${name}」`+(months.length?`，並清除其於 ${months.length} 個月份的排班/預假紀錄`:''));
 }
 
 // ============================================================
@@ -4209,12 +4337,34 @@ function renderLongLeaveList(){
   }).join('');
 }
 function addPR(){
-  if(isCurrentMonthLocked()){showToast('🔒 本月已完成，班表無法修改','warn');return;}
   const docId=document.getElementById('pr-doc').value;
-  const dates=[..._prSelectedDates].sort();
+  let dates=[..._prSelectedDates].sort();
   const type=document.getElementById('pr-type').value;
   const note=document.getElementById('pr-note').value.trim();
   if(!docId||!dates.length){showToast('請選擇護理師與日期','warn');return;}
+  // 迷你月曆選取的日期在切換月份後仍可能殘留跨月的舊選取，逐一檢查每個日期實際所屬的
+  // 月份是否已鎖定(而不是只看目前畫面停在哪個月)，避免把紀錄寫進已「完成」鎖定的月份。
+  const lockedDates=dates.filter(d=>{ const{y,m}=ymFromDate(d); return _lockedMonths.has(monthKey(y,m)); });
+  if(lockedDates.length){
+    dates=dates.filter(d=>!lockedDates.includes(d));
+    showToast(`🔒 ${lockedDates.join('、')} 所屬月份已完成鎖定，已略過`,'warn');
+    if(!dates.length) return;
+  }
+  // 在職期間檢查：預假/預班放置先前不檢查是否在職，可能把紀錄登記在到職前/離職後的日期。
+  const notEmployed=dates.filter(d=>!isEmployedOnDate(docId,d));
+  if(notEmployed.length){
+    dates=dates.filter(d=>isEmployedOnDate(docId,d));
+    showToast(`⚠ ${getDocName(docId)} 於 ${notEmployed.join('、')} 不在職期間，已略過`,'warn');
+    if(!dates.length) return;
+  }
+  // 同人同日已存在「相反類型」(OFF↔預上班)紀錄時，先前會靜默疊加、造成同一天既登記OFF又
+  // 登記WORK的矛盾資料(排班時WORK會不看offBlocked地直接蓋過)。改為先讓使用者確認是否要
+  // 以新設定取代舊的。
+  const isOff=type==='OFF';
+  const conflictDates=dates.filter(d=>(state.preRequests[d]||[]).some(pr=>pr.docId===docId&&(isOff?pr.type.startsWith('WORK_'):pr.type==='OFF')));
+  if(conflictDates.length){
+    if(!confirm(`${getDocName(docId)} 於 ${conflictDates.join('、')} 已登記${isOff?'預上班':'預假OFF'}紀錄，是否要移除舊紀錄、改成${prLabel({type})}？`)) return;
+  }
   // 每人每月最多預假天數檢核（僅限OFF類型；預上班(排D/E/N班)不受此限）
   if(type==='OFF'&&(state.maxOffDays!=null||state.maxOffHolidayDays!=null)){
     const byMonth={};
@@ -4244,6 +4394,9 @@ function addPR(){
   pushUndo();
   let cnt=0;
   for(const cur of dates){
+    if(conflictDates.includes(cur)){
+      state.preRequests[cur]=(state.preRequests[cur]||[]).filter(pr=>!(pr.docId===docId&&(isOff?pr.type.startsWith('WORK_'):pr.type==='OFF')));
+    }
     if(!state.preRequests[cur]) state.preRequests[cur]=[];
     state.preRequests[cur].push({id:'pr_'+Date.now()+'_'+cnt,docId,type,note});
     cnt++;
@@ -4476,9 +4629,13 @@ function renderLaborLawCheck(){
         runLen=0;
       }
     }
-    // 2) 單週工時：以週一為界，累計每週總時數，超過48小時提示
+    // 2) 單週工時：以週一為界，累計每週總時數，超過48小時提示。月初/月底所在那一週可能
+    // 跨到鄰月，若只加總「本月內」的日子會低估該週工時、造成漏報，因此把掃描範圍延伸到
+    // 該週完整的週一～週日(鄰月已排的班一併納入)，只是判斷/提示邏輯本身不變。
     const weekHours={};
-    for(const d of dates){
+    let wkScanStart=dates[0]; while(getDOW(wkScanStart)!==0) wkScanStart=addDays(wkScanStart,-1);
+    let wkScanEnd=dates[dates.length-1]; while(getDOW(wkScanEnd)!==6) wkScanEnd=addDays(wkScanEnd,1);
+    for(let d=wkScanStart; d<=wkScanEnd; d=addDays(d,1)){
       const h=hoursOnDate(doc.id,d);
       if(!h) continue;
       // 該日所屬週一
@@ -4945,17 +5102,30 @@ function renderWorkGrid(){
   });
   document.getElementById('work-table').classList.toggle('wk-hi-active', !!_wkHiPos||!!_wkHiShift);
 }
+// 系統自動產生的鎖定紀錄一律帶這些note之一；使用者透過「預假/預班」分頁登記的正式紀錄
+// note不會是這些值，藉此區分「可安全自動清除」與「需詢問使用者才能清除」兩種紀錄。
+const SYS_MANUAL_NOTES=new Set(['月班總表手動輸入','月班總表手動刪除班別']);
 // 移除該人於該日「所有」手動鎖定(WORK_D/E/N預班或OFF)，供改班/雙擊解鎖等情境共用。
-function clearManualPin(nurseId,dateStr){
-  if(!state.preRequests[dateStr]) return;
-  state.preRequests[dateStr]=state.preRequests[dateStr].filter(pr=>!(pr.docId===nurseId&&(pr.type.startsWith('WORK_')||pr.type==='OFF')));
+// 預設(force=false/未傳)只清除系統自動產生的鎖定，使用者在「預假/預班」分頁登記的正式紀錄
+// 一律保留——這是為了讓 syncDayRolesForSpecialShift 這類自動化流程(含 applyData 載入資料時
+// 全月掃過一次)絕不會靜默刪掉使用者資料。只有呼叫端已經明確詢問過使用者並取得同意時，
+// 才傳 force=true 一併清除使用者登記的紀錄。
+function clearManualPin(nurseId,dateStr,force){
+  const list=state.preRequests[dateStr];
+  if(!list) return;
+  state.preRequests[dateStr]=list.filter(pr=>!(pr.docId===nurseId&&(pr.type.startsWith('WORK_')||pr.type==='OFF')&&(force||SYS_MANUAL_NOTES.has(pr.note))));
   if(!state.preRequests[dateStr].length) delete state.preRequests[dateStr];
+}
+// 該人於該日是否有「使用者登記」的正式預假/預班紀錄(note非系統自動產生標記)。
+function hasUserRegisteredPin(nurseId,dateStr){
+  return (state.preRequests[dateStr]||[]).some(pr=>pr.docId===nurseId&&(pr.type.startsWith('WORK_')||pr.type==='OFF')&&!SYS_MANUAL_NOTES.has(pr.note));
 }
 // 月班總表手動輸入的一般班別(D/E/N)視同「預班」固定下來：改用WORK_D/E/N預請求鎖定，
 // 讓自動排班每次重新產生整月班表時，仍會把這個人排回同一個班別、且鎖定不被搬動/覆蓋
 // (機制與「預假/預班」分頁既有的預上班完全共用)。shift傳null代表僅移除鎖定(改為特班)。
-function setManualWorkPin(nurseId,dateStr,shift){
-  clearManualPin(nurseId,dateStr);
+// force：呼叫端已確認使用者同意覆蓋既有使用者登記紀錄時傳true，否則只清系統標記。
+function setManualWorkPin(nurseId,dateStr,shift,force){
+  clearManualPin(nurseId,dateStr,force);
   if(shift){
     if(!state.preRequests[dateStr]) state.preRequests[dateStr]=[];
     state.preRequests[dateStr].push({id:'pr_manual_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),docId:nurseId,type:'WORK_'+shift,note:'月班總表手動輸入'});
@@ -4963,8 +5133,8 @@ function setManualWorkPin(nurseId,dateStr,shift){
 }
 // 月班總表手動把班別刪掉(留空)，視同手動鎖定「這天必須OFF」，自動排班不會再把這人排進這天
 // (與WORK_D/E/N相同精神：手動改動一律固定下來，直到使用者雙擊解鎖或重新輸入其他班別)。
-function setManualOffPin(nurseId,dateStr){
-  clearManualPin(nurseId,dateStr);
+function setManualOffPin(nurseId,dateStr,force){
+  clearManualPin(nurseId,dateStr,force);
   if(!state.preRequests[dateStr]) state.preRequests[dateStr]=[];
   state.preRequests[dateStr].push({id:'pr_manual_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),docId:nurseId,type:'OFF',note:'月班總表手動刪除班別'});
 }
@@ -4982,9 +5152,12 @@ function isManualLocked(nurseId,dateStr){
 // D12/N12為手動特班，本身已不受自動排班影響，不適用此鎖定機制。
 function unlockManualCell(nurseId,dateStr){
   if(isCurrentMonthLocked()){ showToast('🔒 本月已完成，班表無法修改','warn'); return; }
-  pushUndo();
   if(isManualLocked(nurseId,dateStr)){
-    clearManualPin(nurseId,dateStr);
+    // 若這格鎖定的其實是使用者在「預假/預班」分頁登記的正式紀錄(不是月班總表系統自動產生
+    // 的鎖定)，雙擊解鎖會把該筆正式紀錄整筆刪掉——先問過使用者再動手。
+    if(hasUserRegisteredPin(nurseId,dateStr)&&!confirm(`${getDocName(nurseId)} 於 ${dateStr} 有使用者在「預假/預班」分頁登記的正式紀錄，解除鎖定將一併移除該筆紀錄，確定要移除嗎？`)) return;
+    pushUndo();
+    clearManualPin(nurseId,dateStr,true);
     autoSave();
     renderMasterGrid();
     renderCalendar();
@@ -4992,6 +5165,7 @@ function unlockManualCell(nurseId,dateStr){
     showToast(`✅ 已解除手動鎖定，下次自動排班可調整此格`);
     return;
   }
+  pushUndo();
   const sh=shiftOfNurseOnDate(nurseId,dateStr);
   if(sh&&SPECIAL_SHIFTS.includes(sh)){
     showToast('D12/N12特班本身即手動排列，不適用此鎖定','warn');
@@ -5142,6 +5316,14 @@ function updateMasterCell(nurseId,dateStr,rawVal){
   // 鎖定/解除鎖定唯一入口是雙擊(unlockManualCell)；這裡輸入/刪除本身「不會」新增鎖定，
   // 但若這一格「原本就已鎖定」，則維持鎖定並同步更新為新輸入的內容，避免鎖定內容與畫面顯示不一致。
   const wasLocked=isManualLocked(nurseId,dateStr);
+  // 若這格原本就鎖定著使用者在「預假/預班」分頁登記的正式紀錄(非系統自動產生)，
+  // 直接在月班總表輸入班別會連同該筆正式紀錄一併靜默清除——務必先問過使用者。
+  if(wasLocked&&hasUserRegisteredPin(nurseId,dateStr)){
+    if(!confirm(`${getDocName(nurseId)} 於 ${dateStr} 已在「預假/預班」分頁登記正式紀錄，修改此格將一併移除該筆紀錄，確定要覆蓋嗎？`)){
+      renderMasterGrid();
+      return;
+    }
+  }
   pushUndo();
   const ds=ensureDay(dateStr);
   for(const sh of SHIFTS){
@@ -5161,13 +5343,13 @@ function updateMasterCell(nurseId,dateStr,rawVal){
       idx=arr.length-1;
     }
     arr[idx]=nurseId;
-    if(wasLocked) setManualWorkPin(nurseId,dateStr,val);
+    if(wasLocked) setManualWorkPin(nurseId,dateStr,val,true);
   } else if(val&&MANUAL_SHIFTS.includes(val)){
     if(!ds[val]) ds[val]=[];
     ds[val].push(nurseId); // D12/N12/H 無固定格數，直接附加(手動排列)
-    if(wasLocked) clearManualPin(nurseId,dateStr); // 改為特班/行政班，一般班鎖定不再適用
+    if(wasLocked) clearManualPin(nurseId,dateStr,true); // 改為特班/行政班，一般班鎖定不再適用(使用者已於上方確認)
   } else {
-    if(wasLocked) setManualOffPin(nurseId,dateStr);
+    if(wasLocked) setManualOffPin(nurseId,dateStr,true);
   }
   syncDayRolesForSpecialShift(dateStr); // 當天若有D12/N12(12小時特班)，一般班的空缺格數收斂/還原
   setHourAdjust(nurseId,dateStr,forcedHour); // 重新指派/取消班別時回到預設時數；若為班別+批修時數合併輸入，則採用批修後的時數
@@ -5211,6 +5393,7 @@ function setGlobalMonth(yy,mm){
   _prListYear=yy; _prListMonth=mm;
   _statsYear=yy;  _statsMonth=mm;
   _prCalYear=yy;  _prCalMonth=mm;
+  _prSelectedDates.clear(); // 換月時清空迷你月曆的選取，避免跨月殘留選取造成後續新增預假/預班寫錯月份
   renderCalendar(); renderMasterGrid(); renderWorkGrid(); renderNurseTable();
   renderPRList(); renderPRCalGrid(); renderStats();
   updateUndoBtn(); updateRedoBtn(); updateLockBtn();
@@ -5277,6 +5460,9 @@ const LS_KEY='tienSheng_erNurseSched_v2';
 const CLOUD_URL_KEY='tienSheng_erNurseCloudUrl';
 const DEFAULT_CLOUD_URL='https://tenchener-488d2-default-rtdb.firebaseio.com/';
 let _fbApp=null,_fbRef=null,_fbIgnoreOwn=false,_fbIgnoreTimer=null;
+// _cloudReady：尚未跟雲端至少交換過一次資料前，一律不允許把本機資料寫回雲端(cloudSave直接return)，
+// 避免「全新裝置/全新瀏覽器分頁一開啟就用空白或過期的本機狀態覆蓋掉雲端共用資料」這個已知風險。
+let _cloudReady=false;
 
 function serializeState(){
   return {
@@ -5323,6 +5509,33 @@ function applyData(d){
       if(ds.D8){ ds.D12=[...(ds.D12||[]),...ds.D8]; delete ds.D8; }
       if(ds.N8){ ds.N12=[...(ds.N12||[]),...ds.N8]; delete ds.N8; }
     }
+    // Firebase RTDB 的陣列若含 null 元素，set() 寫入時該元素會被移除；讀回時如果非null元素
+    // 不足一半，SDK可能把它還原成物件({0:'a',2:'b'})而不是陣列，導致半滿班表跨裝置讀取後
+    // 格子錯位甚至整天消失。這裡只在「載入時」依當時的角色人數模板(roles[sh].length)把
+    // D/E/N重建為正確長度、正確順序的陣列(缺的位置補null)；D12/N12/H無固定格數模板，
+    // 若被還原成物件則依數字鍵排序攤回緊湊陣列。只在載入時做，不改變既有儲存格式。
+    for(const ds of Object.values(state.schedule)){
+      if(!ds||typeof ds!=='object') continue;
+      const rolesTpl=ds.roles||{};
+      for(const sh of SHIFTS){
+        const raw=ds[sh];
+        if(raw==null) continue;
+        const roleLen=(rolesTpl[sh]&&rolesTpl[sh].length)||(Array.isArray(raw)?raw.length:0);
+        if(!Array.isArray(raw)){
+          const rebuilt=new Array(roleLen).fill(null);
+          for(const k of Object.keys(raw)){ const idx=parseInt(k,10); if(!isNaN(idx)&&idx>=0&&idx<roleLen) rebuilt[idx]=raw[k]; }
+          ds[sh]=rebuilt;
+        } else if(raw.length<roleLen){
+          ds[sh]=[...raw, ...Array(roleLen-raw.length).fill(null)];
+        }
+      }
+      for(const sh of MANUAL_SHIFTS){
+        const raw=ds[sh];
+        if(raw==null||Array.isArray(raw)) continue;
+        const keys=Object.keys(raw).map(k=>parseInt(k,10)).filter(n=>!isNaN(n)).sort((a,b)=>a-b);
+        ds[sh]=keys.map(k=>raw[k]);
+      }
+    }
   }
   state.hourAdjust=d.hourAdjust||{};
   state.dayNotes=d.dayNotes||{};
@@ -5356,13 +5569,21 @@ function applyData(d){
 // 上一次尚未寫入雲端完成的存檔被雲端舊資料覆蓋，導致剛剛的修改消失」的競速問題。
 let _lastLocalTs=0;
 function autoSave(){
+  _lastLocalTs=Date.now();
+  let ok=true;
   try{
-    _lastLocalTs=Date.now();
     localStorage.setItem(LS_KEY,JSON.stringify({...serializeState(),_ts:_lastLocalTs}));
     const ind=document.getElementById('_autosave_ind');
     if(ind){ind.style.opacity='1';clearTimeout(ind._t);ind._t=setTimeout(()=>ind.style.opacity='0',1500);}
-    cloudSave();
-  }catch(e){console.warn('AutoSave failed',e);}
+  }catch(e){
+    ok=false;
+    console.warn('AutoSave failed',e);
+    // 呼叫端緊接著通常會顯示「已更新/已新增」等成功toast，蓋掉這裡的警告；用短延遲讓警告
+    // 晚一步顯示、並設為sticky(不自動消失)，確保使用者真的看得到本機儲存失敗了。
+    setTimeout(()=>showToast('⚠ 本機儲存失敗，這次變更可能於重新整理後遺失：'+e.message,'warn',true),50);
+  }
+  cloudSave(); // 移出try：即使本機儲存失敗，仍嘗試同步雲端，作為救援備份
+  return ok;
 }
 function autoLoad(){
   try{
@@ -5385,15 +5606,32 @@ async function initCloud(url){
   try{
     if(_fbRef){ _fbRef.off(); _fbRef=null; }
     if(_fbApp){ try{ await firebase.app('erNurseSched').delete(); }catch(e){} _fbApp=null; }
-    _fbApp=firebase.initializeApp({databaseURL:url.trim()},'erNurseSched');
+    _fbApp=firebase.initializeApp({apiKey:'AIzaSyB6w2D8gaqSBHoDmtWsWGWGY-DQtDEcyFY',authDomain:'tenchener-488d2.firebaseapp.com',databaseURL:url.trim()},'erNurseSched');
+    await firebase.auth(_fbApp).signInAnonymously();
     _fbRef=firebase.database(_fbApp).ref('erNurseScheduleData');
+    _cloudReady=false;
     _fbRef.on('value', snap=>{
       if(_fbIgnoreOwn) return;
       const data=snap.val();
-      // 若雲端資料的時間戳記不比本機新(或雲端根本還是空的)，代表雲端還沒收到本機最新的存檔
-      // (例如上一次存檔的雲端寫入還沒完成就重新整理/離開頁面，導致寫入被中斷)。
-      // 這種情況不套用雲端資料，並主動把本機資料再推一次上去，確保雲端與其他裝置最終能同步到最新版本。
-      if(!data||(data._ts&&data._ts<=_lastLocalTs)){ cloudSave(); return; }
+      if(!data){
+        // 雲端目前真的是空的(全新資料庫，或從未同步過)：標記為就緒，之後正常的存檔動作
+        // (autoSave/cloudSave)才會把本機資料寫上去；這裡「不」主動寫入，避免任何一台裝置
+        // 單方面決定共用雲端的初始內容。
+        _cloudReady=true;
+        updateCloudStatus(true,'雲端目前無資料，將於下次存檔建立');
+        return;
+      }
+      if(data._ts&&data._ts<=_lastLocalTs){
+        // 雲端資料不比本機新：過去的做法是直接把本機資料蓋回雲端(cloudSave())——這正是
+        // 「環境不小心把本機這份意外開啟，完全不需要使用者互動就覆蓋掉雲端共用資料」的風險
+        // 根源。改為：以雲端這個大家共用的真相來源為準，套用雲端資料到本機，絕不讓任何一台
+        // 裝置的本機狀態去覆寫大家共用的雲端資料。
+        _cloudReady=true;
+        applyCloudData(data);
+        updateCloudStatus(true,'已採用雲端最新資料');
+        return;
+      }
+      _cloudReady=true;
       applyCloudData(data);
     });
     updateCloudStatus(true);
@@ -5414,6 +5652,7 @@ function applyCloudData(data){
 }
 function cloudSave(){
   if(!_fbRef) return;
+  if(!_cloudReady) return; // 尚未跟雲端至少同步過一次前，絕不把本機狀態寫回雲端
   _fbIgnoreOwn=true;
   clearTimeout(_fbIgnoreTimer);
   _fbIgnoreTimer=setTimeout(()=>{ _fbIgnoreOwn=false; },4000);
@@ -5501,6 +5740,7 @@ function restoreJSON(input){
     _prCalYear=state.year; _prCalMonth=state.month;
     _prListYear=state.year; _prListMonth=state.month;
     _statsYear=state.year; _statsMonth=state.month;
+    _prSelectedDates.clear(); // 載入整份備份後，先前殘留的迷你月曆選取已不再對應目前資料，一併清空
     renderCalendar(); renderMasterGrid(); renderWorkGrid(); renderNurseTable(); renderPRList(); renderPRCalGrid(); renderStats();
     updateUndoBtn(); updateRedoBtn(); updateLockBtn();
     showToast('✅ 已載入檔案，全部資料已回復');
@@ -6153,6 +6393,7 @@ window.onload=()=>{
   _prCalYear=state.year; _prCalMonth=state.month;
   _prListYear=state.year; _prListMonth=state.month;
   _statsYear=state.year; _statsMonth=state.month;
+  _prSelectedDates.clear();
   renderCalendar();
   renderMasterGrid();
   renderNurseTable();
