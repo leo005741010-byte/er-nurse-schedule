@@ -935,11 +935,41 @@ function isSenior(nurseOrId){
 // ============================================================
 // 當月工作日期區間 (到職/離職日對應的可上班日期範圍，逐月設定)
 // ============================================================
-function getWorkRange(nurseId,y,m){
+// 離職設定 (doc.retiredOn='YYYY-MM-DD'，該日起不再排班)。
+// 刻意「不」把人從 state.doctors 移除——班表格子裡存的是護理師 id，人被真的刪掉，
+// 過去月份的班表就會跟著一起消失。離職只代表「從離職日起不在職」，之前上過的班永遠保留。
+function retireInfo(nurseId){
+  const doc=state.doctors.find(d=>d.id===nurseId);
+  if(!doc||!doc.retiredOn) return null;
+  const p=String(doc.retiredOn).split('-').map(Number);
+  if(p.length!==3||!p[0]||!p[1]||!p[2]) return null;
+  return {y:p[0],m:p[1]-1,day:p[2],str:doc.retiredOn};
+}
+// 把當月工作日期區間依離職日裁掉：離職月「之後」整月不在職(end<start 的空區間)，
+// 離職當月只能上到離職日的前一天；離職月「之前」完全不受影響(歷史班表原樣保留)。
+function clampRangeByRetire(nurseId,y,m,range){
+  const r=retireInfo(nurseId); if(!r) return range;
+  const cur=y*12+m, ret=r.y*12+r.m;
+  if(cur>ret) return {start:1,end:0};
+  if(cur<ret) return range;
+  return {start:range.start,end:Math.min(range.end,r.day-1)};
+}
+// 未套用離職裁切的原始設定值：編輯視窗與人員清單顯示用，
+// 避免把 1-0 這種空區間當成使用者設定寫回 workDateRange。
+function getRawWorkRange(nurseId,y,m){
   const k=monthKey(y,m);
   const r=state.workDateRange[k]&&state.workDateRange[k][nurseId];
   if(!r) return {start:1,end:daysInMonth(y,m)};
-  return r;
+  return {start:r.start,end:r.end};
+}
+function getWorkRange(nurseId,y,m){
+  return clampRangeByRetire(nurseId,y,m,getRawWorkRange(nurseId,y,m));
+}
+// 該月是否已完全離職(整月都不在職)——用來從人員清單/排班/統計中隱藏，歷史月份則照常顯示
+function isRetiredInMonth(nurseId,y,m){
+  if(!retireInfo(nurseId)) return false;
+  const wr=getWorkRange(nurseId,y,m);
+  return wr.end<wr.start;
 }
 function setWorkRange(nurseId,y,m,range){
   const k=monthKey(y,m);
@@ -987,10 +1017,30 @@ function setNurseShiftType(nurseId,y,m,val){
   state.monthlyShiftType[k][nurseId]=val;
 }
 // 排序：許嘉君等管理職在最上方，其下依當月班別 D→E→N 分組，組內再依階級 L→T→A2→B 排列
+// 當月班表裡實際出現過的人(含手動班)。已離職者原則上該月不會有班，
+// 但萬一有殘留(例如手動貼上的班)，仍要讓他出現在名單裡，不能變成看不見的幽靈班。
+function idsWithScheduleInMonth(y,m){
+  const pad=`${y}-${String(m+1).padStart(2,'0')}-`;
+  const ids=new Set();
+  for(const[d,ds] of Object.entries(state.schedule||{})){
+    if(!ds||d.slice(0,pad.length)!==pad) continue;
+    for(const sh of SHIFTS) for(const x of (ds[sh]||[])) if(x) ids.add(x);
+    for(const sh of MANUAL_SHIFTS) for(const x of (ds[sh]||[])) if(x) ids.add(x);
+  }
+  return ids;
+}
+// 當月「還在職」的人員池：已離職者自離職月起不再出現，離職前的月份完全照舊
+function activeRoster(y,m){
+  const gone=state.doctors.filter(d=>d.retiredOn&&isRetiredInMonth(d.id,y,m));
+  if(!gone.length) return state.doctors;
+  const keep=idsWithScheduleInMonth(y,m);
+  return state.doctors.filter(d=>!(d.retiredOn&&isRetiredInMonth(d.id,y,m))||keep.has(d.id));
+}
 function sortedRoster(y,m){
-  const head=state.doctors.filter(d=>d.type==='head');
-  const full=state.doctors.filter(d=>d.type==='full');
-  const support=state.doctors.filter(d=>d.type==='support');
+  const pool=activeRoster(y,m);
+  const head=pool.filter(d=>d.type==='head');
+  const full=pool.filter(d=>d.type==='full');
+  const support=pool.filter(d=>d.type==='support');
   const groups={D:[],E:[],N:[],other:[]};
   for(const d of full){
     const st=getNurseShiftType(d.id,y,m);
@@ -3926,6 +3976,7 @@ function materializeMonthShiftTypes(y,m){
   let changed=false;
   for(const d of state.doctors){
     if(d.type!=='full') continue;
+    if(isRetiredInMonth(d.id,y,m)) continue;   // 已離職者不需要再寫入當月班別設定
     setNurseShiftType(d.id,y,m,getNurseShiftType(d.id,y,m));
     changed=true;
   }
@@ -3949,13 +4000,17 @@ function renderNurseTable(){
   const lbl=document.getElementById('nurse-month-label');
   if(lbl) lbl.textContent=`${state.year}年${state.month+1}月`;
   const roster=sortedRoster(state.year,state.month);
-  document.getElementById('nurse-tbody').innerHTML=roster.map(d=>{
+  // 已離職者不在當月名單裡，另外用灰色列附在表尾，才看得到、也才能復職或永久刪除
+  const retiredRows=state.doctors.filter(d=>d.retiredOn&&!roster.some(x=>x.id===d.id));
+  const rowHtml=(d)=>{
     const shiftStr=d.type==='full'?getNurseShiftType(d.id,state.year,state.month):'-';
     const lvl=d.prefs.level||'L';
     const genderLabel=d.prefs.gender==='M'?'男':'女';
-    const wr=getWorkRange(d.id,state.year,state.month);
+    const wr=getRawWorkRange(d.id,state.year,state.month);
     const dim=daysInMonth(state.year,state.month);
-    const wrStr=(wr.start===1&&wr.end===dim)?'全月':`${wr.start}-${wr.end}`;
+    const retired=isRetiredInMonth(d.id,state.year,state.month);
+    const wrStr=retired?`<span style="color:#c0392b;font-weight:600">已離職</span><br><span style="font-size:11px;color:#c0392b">${d.retiredOn} 起</span>`
+      :(wr.start===1&&wr.end===dim)?'全月':`${wr.start}-${wr.end}`;
     const supportStr=d.prefs.allowSupport!==false?'✔':'✕';
     // 位置優先(當月)：顯示偏好階級與其代表位置；未設定顯示「—」。
     const rolePref=d.type==='full'?getRolePref(d.id,state.year,state.month):'';
@@ -3973,10 +4028,10 @@ function renderNurseTable(){
     const gKey=rosterGroupKey(d,state.year,state.month);
     const gArr=roster.filter(x=>rosterGroupKey(x,state.year,state.month)===gKey);
     const gi=gArr.findIndex(x=>x.id===d.id);
-    const ordCell=gArr.length<2?'<span style="color:#ccc">—</span>':
+    const ordCell=(retired||gArr.length<2)?'<span style="color:#ccc">—</span>':
       `<button class="btn-sm ord-btn" onclick="moveNurseOrder('${d.id}',-1)" ${gi<=0?'disabled':''} title="上移(同班別組內)">▲</button>`+
       `<button class="btn-sm ord-btn" onclick="moveNurseOrder('${d.id}',1)" ${gi>=gArr.length-1?'disabled':''} title="下移(同班別組內)">▼</button>`;
-    return `<tr>
+    return `<tr${retired?' style="opacity:.6;background:#fafafa"':''}>
       <td style="white-space:nowrap">${ordCell}</td>
       <td><span class="color-dot" style="background:${d.color}"></span></td>
       <td>${d.name}</td>
@@ -3990,9 +4045,12 @@ function renderNurseTable(){
       <td>${d.type==='full'?wrStr:'-'}</td>
       <td>${d.type==='full'?supportStr:'-'}</td>
       <td style="text-align:left">${d.type!=='full'?'-':(pfBadges.length?pfBadges.join(' '):'<span style="color:#bbb">—</span>')}</td>
-      <td><button class="btn-sm btn-edit" onclick="openNurseModal('${d.id}')">編輯</button><button class="btn-sm btn-del" onclick="deleteDoc('${d.id}')">刪除</button></td>
+      <td style="white-space:nowrap"><button class="btn-sm btn-edit" onclick="openNurseModal('${d.id}')">編輯</button>${retired
+        ?`<button class="btn-sm btn-edit" onclick="unretireDoc('${d.id}')" title="取消離職，之後的月份重新納入排班">復職</button><button class="btn-sm btn-del" onclick="purgeDoc('${d.id}')" title="連同過去所有月份的班表紀錄一起永久刪除">永久刪除</button>`
+        :`<button class="btn-sm btn-del" onclick="retireDoc('${d.id}')" title="設定離職日：該日起不再排班，之前的班表完整保留">離職</button>`}</td>
     </tr>`;
-  }).join('');
+  };
+  document.getElementById('nurse-tbody').innerHTML=roster.map(rowHtml).join('')+retiredRows.map(rowHtml).join('');
 
   const sel1=document.getElementById('pair-doc1'), sel2=document.getElementById('pair-doc2');
   if(sel1&&sel2){
@@ -4100,7 +4158,7 @@ function openNurseModal(id){
   const wrTitle=document.getElementById('doc-modal-workrange-title');
   if(wrTitle) wrTitle.textContent=`${state.year}年${state.month+1}月 工作日期`;
   const dim=daysInMonth(state.year,state.month);
-  const wr=isEdit?getWorkRange(d.id,state.year,state.month):{start:1,end:dim};
+  const wr=isEdit?getRawWorkRange(d.id,state.year,state.month):{start:1,end:dim};
   document.getElementById('doc-workrange').value=(wr.start===1&&wr.end===dim)?'':`${wr.start}-${wr.end}`;
   document.getElementById('nurse-modal').classList.add('show');
 }
@@ -4161,7 +4219,64 @@ function saveDoc(){
   renderNurseTable(); renderCalendar(); renderMasterGrid();
   showToast('✅ 已儲存');
 }
-function deleteDoc(id){
+// ============================================================
+// 離職 / 復職 / 永久刪除
+// 人員異動的預設作法是「離職」：從離職日起不再排班，離職日之前的班表原樣保留。
+// 真正的「永久刪除」只留給誤建的資料，會連同歷史班表一起清掉(有明確警告)。
+// ============================================================
+function retireDoc(id){
+  const doc=state.doctors.find(x=>x.id===id); if(!doc) return;
+  const name=doc.name;
+  const def=doc.retiredOn||`${state.year}-${String(state.month+1).padStart(2,'0')}-01`;
+  const input=prompt(`「${name}」離職設定\n\n請輸入「開始不排班」的日期(YYYY-MM-DD)：\n・此日期之前的班表與紀錄一律完整保留\n・只清除此日期(含)以後尚未發生的排班／預假\n\n例如9月起離職就填 ${state.year}-09-01`, def);
+  if(input===null) return;
+  const day=(input||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(day)){ showToast('日期格式錯誤，請用 YYYY-MM-DD','warn'); return; }
+  // 先掃出離職日之後仍殘留的排班/預假，讓使用者確認清楚要清掉的範圍
+  const affected=new Set();
+  for(const[d,ds] of Object.entries(state.schedule)){
+    if(d<day||!ds) continue;
+    let hit=false;
+    for(const sh of SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
+    for(const sh of MANUAL_SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
+    if(hit) affected.add(d.slice(0,7));
+  }
+  for(const[d,prs] of Object.entries(state.preRequests)){
+    if(d<day) continue;
+    if((prs||[]).some(p=>p.docId===id)) affected.add(d.slice(0,7));
+  }
+  const months=[...affected].sort();
+  const detail=months.length?`\n\n${day} 之後這些月份還有排班或預假紀錄，將一併清除：\n${months.join('、')}`:'';
+  if(!confirm(`確定將「${name}」設為 ${day} 起離職？\n\n✅ ${day} 之前的班表、預假、統計全部保留不動。${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
+  pushUndo();
+  doc.retiredOn=day;
+  for(const[d,ds] of Object.entries(state.schedule)){
+    if(d<day||!ds) continue;
+    for(const sh of SHIFTS){ const arr=ds[sh]; if(!arr) continue; for(let i=0;i<arr.length;i++) if(arr[i]===id) arr[i]=null; }
+    for(const sh of MANUAL_SHIFTS){ if(Array.isArray(ds[sh])) ds[sh]=ds[sh].filter(x=>x!==id); }
+  }
+  for(const d of Object.keys(state.preRequests)){
+    if(d<day) continue;
+    state.preRequests[d]=state.preRequests[d].filter(p=>p.docId!==id);
+    if(!state.preRequests[d].length) delete state.preRequests[d];
+  }
+  // 位置鎖定只清離職日以後的(之前的對應到歷史班表，要留著)
+  state.posLocks=(state.posLocks||[]).filter(l=>l.nurseId!==id||l.date<day);
+  // 配對規則/避免同班是「之後排班用」的限制，離職後留著只會變成排不到的雜訊
+  state.pairRules=(state.pairRules||[]).filter(r=>r.a!==id&&r.b!==id);
+  state.avoidPairs=(state.avoidPairs||[]).filter(p=>p[0]!==id&&p[1]!==id);
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`👋 已設定「${name}」${day} 起離職，之前的班表完整保留`);
+}
+function unretireDoc(id){
+  const doc=state.doctors.find(x=>x.id===id); if(!doc) return;
+  if(!confirm(`確定讓「${doc.name}」復職(取消離職)？\n取消後從目前月份起會重新納入排班名單。`)) return;
+  pushUndo();
+  delete doc.retiredOn;
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`✅ 已取消「${doc.name}」的離職設定`);
+}
+function purgeDoc(id){
   // 掃描該護理師在哪些月份還有排班或預假/預班紀錄，讓使用者確認清楚刪除範圍後才動手，
   // 避免刪除人員設定後，各處(班表/預假/位置鎖定/配對規則/順序等)留下對應不到人的「幽靈id」。
   const monthsWithSched=new Set();
@@ -4177,8 +4292,8 @@ function deleteDoc(id){
   }
   const months=[...new Set([...monthsWithSched,...monthsWithPR])].sort();
   const name=getDocName(id);
-  const detail=months.length?`\n\n此人於以下月份仍有排班或預假/預班紀錄，將一併清除：\n${months.join('、')}`:'';
-  if(!confirm(`確定刪除護理師「${name}」？${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
+  const detail=months.length?`\n\n⚠ 此人於以下月份仍有排班或預假/預班紀錄，將「連同過去的歷史班表一起」清除：\n${months.join('、')}\n\n若只是離職，請改用「離職」按鈕(保留歷史班表)。`:'';
+  if(!confirm(`確定永久刪除護理師「${name}」？${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
   pushUndo();
   // 清除各處對這個人的參照，避免留下對應不到人的「幽靈id」
   for(const ds of Object.values(state.schedule)){
@@ -4213,7 +4328,7 @@ function deleteDoc(id){
   }
   state.doctors=state.doctors.filter(x=>x.id!==id);
   autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
-  showToast(`🗑️ 已刪除護理師「${name}」`+(months.length?`，並清除其於 ${months.length} 個月份的排班/預假紀錄`:''));
+  showToast(`🗑️ 已永久刪除護理師「${name}」`+(months.length?`，並清除其於 ${months.length} 個月份的排班/預假紀錄`:''));
 }
 
 // ============================================================
@@ -4544,7 +4659,8 @@ function renderStats(){
     }
   }
   const singleDayIslands=[];
-  for(const doc of state.doctors){
+  const statRoster=sortedRoster(_statsYear,_statsMonth);   // 已離職者不列入該月統計
+  for(const doc of statRoster){
     const s=st[doc.id]; let cur=0; const runs=[];
     for(const dateStr of dates){
       const ds=state.schedule[dateStr]||{};
@@ -4558,7 +4674,7 @@ function renderStats(){
     s.islandDates=islandDates;
     if(doc.type==='full'&&islandDates.length) singleDayIslands.push(`${doc.name}（${islandDates.join('、')}號）`);
   }
-  document.getElementById('stats-tbody').innerHTML=state.doctors.map(doc=>{
+  document.getElementById('stats-tbody').innerHTML=statRoster.map(doc=>{
     const s=st[doc.id];
     const total=s.D+s.E+s.N+s.h; // 總班數含H行政班
     const hrs=calcNurseTotalHours(doc.id,dates);
@@ -4572,7 +4688,7 @@ function renderStats(){
   }).join('');
 
   const viols=[];
-  for(const doc of state.doctors){
+  for(const doc of statRoster){
     if(doc.type!=='full') continue;
     const s=st[doc.id];
     const homeShiftStat=getNurseShiftType(doc.id,_statsYear,_statsMonth);
@@ -4628,7 +4744,7 @@ function renderLaborLawCheck(){
   const y=_statsYear, m=_statsMonth;
   const dates=monthDates(y,m);
   const warns=[];
-  for(const doc of state.doctors){
+  for(const doc of sortedRoster(y,m)){
     if(doc.type!=='full') continue;
     // 1) 七休一：掃描含前後鄰月的連續上班區段，任何落在本月的區段長度>6就提示
     let runStart=null, runLen=0, flaggedConsec=false;
@@ -4713,7 +4829,9 @@ function renderCrossMonthStats(){
       (ds[sh]||[]).forEach(nid=>{ if(!nid||!st[nid])return; st[nid].work++; st[nid].hours+=hoursOnDate(nid,dateStr); });
     }
   }
-  const fulls=state.doctors.filter(d=>d.type==='full');
+  // 已離職者若在這段區間內完全沒有班，就不列入(否則整列0會把平均值拉低)；
+  // 區間包含他離職前的月份時仍會列出，該有的歷史班數不會消失。
+  const fulls=state.doctors.filter(d=>d.type==='full'&&(!d.retiredOn||(st[d.id]&&st[d.id].work>0)));
   const avg=k=>fulls.length?fulls.reduce((s,d)=>s+st[d.id][k],0)/fulls.length:0;
   const avgWork=avg('work'), avgHol=avg('hol'), avgN=avg('N'), avgHours=avg('hours');
   const cellHL=(v,a)=>{ // 偏離平均>15%上色
