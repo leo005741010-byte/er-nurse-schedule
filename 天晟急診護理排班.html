@@ -446,6 +446,7 @@ body{font-family:'Microsoft JhengHei','微軟正黑體',Arial,sans-serif;backgro
       </thead>
       <tbody id="nurse-tbody"></tbody>
     </table>
+    <div id="archived-box" style="margin-top:10px"></div>
     <div style="margin-top:16px;background:#fff;border-radius:6px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,.1)">
       <h3 style="font-size:13px;margin-bottom:10px;color:#0d5c4a">🔗 配對限制設定（誰與誰）</h3>
       <p style="font-size:11px;color:#888;margin-bottom:10px">可設定兩位護理師的關係。日期留空＝整月每天都適用；填日期＝只在該區間內適用（以目前檢視月份為準）。<b style="color:#c0392b">配對限制同時要求太多會互相打架、排不出班，因此只有清單第1筆是「強制」，第2筆以後一律只是「盡量達成」</b>（排得到就排，排不到不強求，也不會擋你手動編輯）。想換哪一筆強制，按該筆的「設為強制」把它移到第1筆即可。<br>強制那筆若是「不能同時放假」＝當天一定至少一人上班，沒有空缺時會把別人換下來讓其中一人頂上，必要時還會放寬「一個月最多2種班別／轉班次數」等軟性規則；<b style="color:#c0392b">唯一例外是兩人當天都登記了預假</b>，此時才准許同時休假，手動把兩人都改成OFF會被擋下。「要同時上班」一律只是盡量達成。未能達成者會在統計報表列出。</p>
@@ -1029,12 +1030,17 @@ function idsWithScheduleInMonth(y,m){
   }
   return ids;
 }
-// 當月「還在職」的人員池：已離職者自離職月起不再出現，離職前的月份完全照舊
+// 該月是否不該出現在名單上：已移出名冊(archived)，或已離職且該月完全不在職
+function isOffRoster(doc,y,m){
+  return !!doc.archived||!!(doc.retiredOn&&isRetiredInMonth(doc.id,y,m));
+}
+// 當月「還在職」的人員池：已離職／已移出名冊者自該月起不再出現，
+// 但只要該月班表裡有他的班(離職前的歷史月份)，就照樣列出來，過去的紀錄永遠看得到。
 function activeRoster(y,m){
-  const gone=state.doctors.filter(d=>d.retiredOn&&isRetiredInMonth(d.id,y,m));
+  const gone=state.doctors.filter(d=>isOffRoster(d,y,m));
   if(!gone.length) return state.doctors;
   const keep=idsWithScheduleInMonth(y,m);
-  return state.doctors.filter(d=>!(d.retiredOn&&isRetiredInMonth(d.id,y,m))||keep.has(d.id));
+  return state.doctors.filter(d=>!isOffRoster(d,y,m)||keep.has(d.id));
 }
 function sortedRoster(y,m){
   const pool=activeRoster(y,m);
@@ -3999,9 +4005,9 @@ function renderNurseTable(){
   materializeMonthShiftTypes(state.year,state.month);
   const lbl=document.getElementById('nurse-month-label');
   if(lbl) lbl.textContent=`${state.year}年${state.month+1}月`;
-  const roster=sortedRoster(state.year,state.month);
-  // 已離職者不在當月名單裡，另外用灰色列附在表尾，才看得到、也才能復職或永久刪除
-  const retiredRows=state.doctors.filter(d=>d.retiredOn&&!roster.some(x=>x.id===d.id));
+  const roster=sortedRoster(state.year,state.month).filter(d=>!d.archived);
+  // 已離職者不在當月名單裡，另外用灰色列附在表尾，才看得到、也才能復職或移出名冊
+  const retiredRows=state.doctors.filter(d=>d.retiredOn&&!d.archived&&!roster.some(x=>x.id===d.id));
   const rowHtml=(d)=>{
     const shiftStr=d.type==='full'?getNurseShiftType(d.id,state.year,state.month):'-';
     const lvl=d.prefs.level||'L';
@@ -4046,11 +4052,12 @@ function renderNurseTable(){
       <td>${d.type==='full'?supportStr:'-'}</td>
       <td style="text-align:left">${d.type!=='full'?'-':(pfBadges.length?pfBadges.join(' '):'<span style="color:#bbb">—</span>')}</td>
       <td style="white-space:nowrap"><button class="btn-sm btn-edit" onclick="openNurseModal('${d.id}')">編輯</button>${retired
-        ?`<button class="btn-sm btn-edit" onclick="unretireDoc('${d.id}')" title="取消離職，之後的月份重新納入排班">復職</button><button class="btn-sm btn-del" onclick="purgeDoc('${d.id}')" title="連同過去所有月份的班表紀錄一起永久刪除">永久刪除</button>`
+        ?`<button class="btn-sm btn-edit" onclick="unretireDoc('${d.id}')" title="取消離職，之後的月份重新納入排班">復職</button><button class="btn-sm btn-del" onclick="archiveDoc('${d.id}')" title="從人員名冊移除：過去的班表與統計完全保留，只是不再出現在清單裡">移出名冊</button>`
         :`<button class="btn-sm btn-del" onclick="retireDoc('${d.id}')" title="設定離職日：該日起不再排班，之前的班表完整保留">離職</button>`}</td>
     </tr>`;
   };
   document.getElementById('nurse-tbody').innerHTML=roster.map(rowHtml).join('')+retiredRows.map(rowHtml).join('');
+  renderArchivedBox();
 
   const sel1=document.getElementById('pair-doc1'), sel2=document.getElementById('pair-doc2');
   if(sel1&&sel2){
@@ -4058,6 +4065,24 @@ function renderNurseTable(){
     sel1.innerHTML=opts; sel2.innerHTML=opts;
   }
   renderPairRules();
+}
+// 已移出名冊的人：平常收合起來不佔版面，但永遠找得回來(他們的歷史班表也一直都在)
+function renderArchivedBox(){
+  const box=document.getElementById('archived-box'); if(!box) return;
+  const list=state.doctors.filter(d=>d.archived);
+  if(!list.length){ box.innerHTML=''; return; }
+  const rows=list.map(d=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 2px;border-bottom:1px dashed #e0e0e0">
+      <span class="color-dot" style="background:${d.color}"></span>
+      <span style="font-weight:600">${d.name}</span>
+      <span style="font-size:11px;color:#888">${d.retiredOn?d.retiredOn+' 起離職':''}</span>
+      <span style="flex:1"></span>
+      <button class="btn-sm btn-edit" onclick="unarchiveDoc('${d.id}')" title="放回人員名冊(仍維持離職狀態，要重新排班請再按復職)">放回名冊</button>
+    </div>`).join('');
+  box.innerHTML=`<details style="background:#fff;border-radius:6px;padding:10px 14px;box-shadow:0 1px 4px rgba(0,0,0,.1)">
+    <summary style="cursor:pointer;font-size:12px;color:#666;font-weight:700">📦 已移出名冊（${list.length} 人）</summary>
+    <p style="font-size:11px;color:#888;margin:8px 0">這些人不會出現在人員清單、排班與之後的統計中，<b style="color:#0d5c4a">但他們過去上過的班、預假與統計完全保留</b>，切到當時的月份一樣看得到。</p>
+    ${rows}
+  </details>`;
 }
 const PAIR_TYPE_LABEL={nowork:'不能同時上班',mustwork:'要同時上班',nooff:'不能同時放假'};
 const PAIR_TYPE_COLOR={nowork:'#c0392b',mustwork:'#2e7d32',nooff:'#e67e22'};
@@ -4250,6 +4275,12 @@ function retireDoc(id){
   if(!confirm(`確定將「${name}」設為 ${day} 起離職？\n\n✅ ${day} 之前的班表、預假、統計全部保留不動。${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
   pushUndo();
   doc.retiredOn=day;
+  clearRecordsFrom(id,day);
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`👋 已設定「${name}」${day} 起離職，之前的班表完整保留`);
+}
+// 只清除 day(含)以後尚未發生的紀錄，day 之前的班表/預假/位置鎖定一律原樣保留
+function clearRecordsFrom(id,day){
   for(const[d,ds] of Object.entries(state.schedule)){
     if(d<day||!ds) continue;
     for(const sh of SHIFTS){ const arr=ds[sh]; if(!arr) continue; for(let i=0;i<arr.length;i++) if(arr[i]===id) arr[i]=null; }
@@ -4260,13 +4291,11 @@ function retireDoc(id){
     state.preRequests[d]=state.preRequests[d].filter(p=>p.docId!==id);
     if(!state.preRequests[d].length) delete state.preRequests[d];
   }
-  // 位置鎖定只清離職日以後的(之前的對應到歷史班表，要留著)
+  // 位置鎖定只清 day 以後的(之前的對應到歷史班表，要留著)
   state.posLocks=(state.posLocks||[]).filter(l=>l.nurseId!==id||l.date<day);
-  // 配對規則/避免同班是「之後排班用」的限制，離職後留著只會變成排不到的雜訊
+  // 配對規則/避免同班是「之後排班用」的限制，人都不排班了，留著只會變成排不到的雜訊
   state.pairRules=(state.pairRules||[]).filter(r=>r.a!==id&&r.b!==id);
   state.avoidPairs=(state.avoidPairs||[]).filter(p=>p[0]!==id&&p[1]!==id);
-  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
-  showToast(`👋 已設定「${name}」${day} 起離職，之前的班表完整保留`);
 }
 function unretireDoc(id){
   const doc=state.doctors.find(x=>x.id===id); if(!doc) return;
@@ -4276,26 +4305,57 @@ function unretireDoc(id){
   autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
   showToast(`✅ 已取消「${doc.name}」的離職設定`);
 }
-function purgeDoc(id){
-  // 掃描該護理師在哪些月份還有排班或預假/預班紀錄，讓使用者確認清楚刪除範圍後才動手，
-  // 避免刪除人員設定後，各處(班表/預假/位置鎖定/配對規則/順序等)留下對應不到人的「幽靈id」。
+// 從人員名冊移出：過去的班表、預假、統計「完全保留」(歷史月份照樣看得到他的班)，
+// 只是不再出現在人員清單、排班與之後的統計中。班表格子存的是 id，真的把人從
+// state.doctors 移除，歷史班表就會變成查不到名字的「未知」，所以一律只標記不刪除。
+// 唯一會真的移除的情況：這個人從頭到尾沒有任何排班/預假紀錄(例如誤新增)，刪掉不會損失任何歷史。
+function archiveDoc(id){
+  const doc=state.doctors.find(x=>x.id===id); if(!doc) return;
+  const name=doc.name;
   const monthsWithSched=new Set();
+  let lastDate='';
   for(const[d,ds] of Object.entries(state.schedule)){
+    if(!ds) continue;
     let hit=false;
     for(const sh of SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
     for(const sh of MANUAL_SHIFTS) if((ds[sh]||[]).includes(id)) hit=true;
-    if(hit) monthsWithSched.add(d.slice(0,7));
+    if(hit){ monthsWithSched.add(d.slice(0,7)); if(d>lastDate) lastDate=d; }
   }
   const monthsWithPR=new Set();
   for(const[d,prs] of Object.entries(state.preRequests)){
-    if((prs||[]).some(p=>p.docId===id)) monthsWithPR.add(d.slice(0,7));
+    if((prs||[]).some(p=>p.docId===id)){ monthsWithPR.add(d.slice(0,7)); if(d>lastDate) lastDate=d; }
   }
   const months=[...new Set([...monthsWithSched,...monthsWithPR])].sort();
-  const name=getDocName(id);
-  const detail=months.length?`\n\n⚠ 此人於以下月份仍有排班或預假/預班紀錄，將「連同過去的歷史班表一起」清除：\n${months.join('、')}\n\n若只是離職，請改用「離職」按鈕(保留歷史班表)。`:'';
-  if(!confirm(`確定永久刪除護理師「${name}」？${detail}\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
+  if(!months.length){
+    // 完全沒有紀錄：直接移除，不會有任何歷史損失
+    if(!confirm(`「${name}」從來沒有任何排班或預假紀錄，將直接從系統移除。\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
+    pushUndo();
+    removeAllDocRefs(id);
+    state.doctors=state.doctors.filter(x=>x.id!==id);
+    autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+    showToast(`🗑️ 已移除「${name}」(無任何班表紀錄)`);
+    return;
+  }
+  const range=`${months[0]}～${months[months.length-1]}`;
+  if(!confirm(`將「${name}」移出人員名冊？\n\n✅ 過去的班表與預假紀錄(${range})完全保留，切到當時的月份照樣看得到他的班、統計也照算。\n・只是不再出現在人員清單、排班與之後的統計中\n・之後可在護理師設定頁最下方的「📦 已移出名冊」展開放回\n\n此操作可用上方「復原」按鈕在儲存前撤銷。`)) return;
   pushUndo();
-  // 清除各處對這個人的參照，避免留下對應不到人的「幽靈id」
+  doc.archived=true;
+  // 沒設過離職日的話(理論上不會發生)，以最後一筆紀錄的隔天為界，之前的一律保留
+  if(!doc.retiredOn) doc.retiredOn=addDays(lastDate,1);
+  clearRecordsFrom(id,doc.retiredOn);
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`📦 已將「${name}」移出名冊，過去的班表完整保留`);
+}
+function unarchiveDoc(id){
+  const doc=state.doctors.find(x=>x.id===id); if(!doc) return;
+  if(!confirm(`把「${doc.name}」放回人員名冊？\n(仍維持離職狀態；要重新排班請再按「復職」)`)) return;
+  pushUndo();
+  delete doc.archived;
+  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
+  showToast(`✅ 已把「${doc.name}」放回名冊`);
+}
+// 清掉各處對某個 id 的參照，只在「這個人完全沒有歷史紀錄、要真的移除」時使用
+function removeAllDocRefs(id){
   for(const ds of Object.values(state.schedule)){
     for(const sh of SHIFTS){ const arr=ds[sh]; if(!arr) continue; for(let i=0;i<arr.length;i++) if(arr[i]===id) arr[i]=null; }
     for(const sh of MANUAL_SHIFTS){ if(Array.isArray(ds[sh])) ds[sh]=ds[sh].filter(x=>x!==id); }
@@ -4326,9 +4386,6 @@ function purgeDoc(id){
   for(const d of Object.keys(state.hourAdjust||{})){
     if(state.hourAdjust[d]) delete state.hourAdjust[d][id];
   }
-  state.doctors=state.doctors.filter(x=>x.id!==id);
-  autoSave(); renderNurseTable(); renderCalendar(); renderMasterGrid(); renderPRList();
-  showToast(`🗑️ 已永久刪除護理師「${name}」`+(months.length?`，並清除其於 ${months.length} 個月份的排班/預假紀錄`:''));
 }
 
 // ============================================================
@@ -4831,7 +4888,7 @@ function renderCrossMonthStats(){
   }
   // 已離職者若在這段區間內完全沒有班，就不列入(否則整列0會把平均值拉低)；
   // 區間包含他離職前的月份時仍會列出，該有的歷史班數不會消失。
-  const fulls=state.doctors.filter(d=>d.type==='full'&&(!d.retiredOn||(st[d.id]&&st[d.id].work>0)));
+  const fulls=state.doctors.filter(d=>d.type==='full'&&((!d.retiredOn&&!d.archived)||(st[d.id]&&st[d.id].work>0)));
   const avg=k=>fulls.length?fulls.reduce((s,d)=>s+st[d.id][k],0)/fulls.length:0;
   const avgWork=avg('work'), avgHol=avg('hol'), avgN=avg('N'), avgHours=avg('hours');
   const cellHL=(v,a)=>{ // 偏離平均>15%上色
