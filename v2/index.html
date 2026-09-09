@@ -6253,8 +6253,19 @@ async function initCloud(url){
       }
       _cloudReady=true;
       applyCloudData(data);
+      updateCloudStatus(true);
+    }, err=>{
+      // 讀取被資料庫規則擋下：連線本身是通的，但這個節點沒有開放權限。
+      // 此時 _cloudReady 永遠是 false、cloudSave 不會寫出任何東西，
+      // 必須明講，否則使用者會以為已經在同步。
+      _cloudReady=false;
+      updateCloudStatus(false,'權限不足（規則未開放 erNurseShiftData）');
+      showToast('☁️ 雲端讀取被拒：Firebase 資料庫規則尚未開放本系統的節點 '
+        +'erNurseShiftData。目前資料仍會完整存在這台裝置的瀏覽器，等規則開通後才會開始同步。'
+        +'（請到 Firebase Console → Realtime Database → 規則，加上 "erNurseShiftData": '
+        +'{".read":"auth != null", ".write":"auth != null"}）','warn',true);
     });
-    updateCloudStatus(true);
+    updateCloudStatus(true,'連線中…');
     localStorage.setItem(CLOUD_URL_KEY,url.trim());
     showToast('☁️ 雲端同步已連線');
   }catch(e){
@@ -6283,7 +6294,7 @@ function cloudSave(){
 }
 function updateCloudStatus(ok,msg=''){
   const el=document.getElementById('_cloud_status'); if(!el) return;
-  el.textContent=ok?'☁️ 已連線':('☁️ '+(msg||'未連線'));
+  el.textContent='☁️ '+(msg||(ok?'已連線':'未連線'));
   el.style.color=ok?'#a5d6a7':'#ef9a9a';
 }
 function openCloudSettings(){
