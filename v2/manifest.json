@@ -1,0 +1,17 @@
+{
+  "name": "天晟急診護理班表",
+  "short_name": "急診護理班表",
+  "description": "天晟醫院急診部護理師班表（看板檢視／自動排班）",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d5c4a",
+  "theme_color": "#0d5c4a",
+  "lang": "zh-TW",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
